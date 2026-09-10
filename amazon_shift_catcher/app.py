@@ -15,7 +15,7 @@ from .browser import (
     read_shift_cards,
     save_screenshot,
 )
-from .notifier import send_telegram
+from .notifier import send_notification
 from .rules import parse_shift, matches_rules, score_shift
 
 
@@ -89,10 +89,12 @@ def run():
                 config.get("job_id") or None,
             )
 
-            send_telegram(
+            send_notification(
                 "Amazon Shift Catcher started.\n"
                 f"Monitoring every {interval} seconds.\n"
-                f"Auto Apply: {'ON' if auto_apply else 'OFF'}"
+                f"Auto Apply: {'ON' if auto_apply else 'OFF'}",
+                title="Amazon monitor started",
+                priority=3,
             )
 
             alerted_for_current_batch = False
@@ -101,9 +103,11 @@ def run():
                 if page_has_security_challenge(page):
                     start_alarm()
                     save_screenshot(page, timestamp_name("security-challenge"))
-                    send_telegram(
-                        "ACTION REQUIRED: Amazon security or verification page detected. "
-                        "Automation has stopped. Complete it manually."
+                    send_notification(
+                        "Amazon security or verification page detected. "
+                        "Automation has stopped. Complete it manually.",
+                        title="Amazon action required",
+                        priority=5,
                     )
                     log.error("Security challenge detected. Stopping.")
                     break
@@ -116,10 +120,11 @@ def run():
                     if not alerted_for_current_batch:
                         start_alarm()
                         save_screenshot(page, timestamp_name("shift-found"))
-                        send_telegram(
-                            f"AMAZON SHIFT FOUND\n\n"
+                        send_notification(
                             f"{len(cards)} available shift option(s) detected.\n"
-                            "Checking your rules now."
+                            "Checking your rules now.",
+                            title="AMAZON SHIFT FOUND",
+                            priority=5,
                         )
                         alerted_for_current_batch = True
 
@@ -159,17 +164,21 @@ def run():
                             save_screenshot(page, timestamp_name("after-apply"))
                             stop_alarm()
 
-                            send_telegram(
-                                "AMAZON MATCHING SHIFT: APPLY CLICKED\n\n" + details +
-                                "\n\nVersion 1 stops after the Apply click. "
-                                "Check the next Amazon page."
+                            send_notification(
+                                details +
+                                "\n\nApply was clicked. Version 1 stops here. "
+                                "Check the next Amazon page.",
+                                title="AMAZON SHIFT APPLY CLICKED",
+                                priority=5,
                             )
                             log.info("Apply clicked. Version 1 complete.")
                             break
                         else:
-                            send_telegram(
-                                "MATCHING AMAZON SHIFT FOUND\n\n" + details +
-                                "\n\nAUTO_APPLY is OFF, so I did not click Apply."
+                            send_notification(
+                                details +
+                                "\n\nAUTO_APPLY is OFF, so Apply was not clicked.",
+                                title="MATCHING AMAZON SHIFT FOUND",
+                                priority=5,
                             )
                             log.warning("Matching shift found but AUTO_APPLY is OFF.")
                     else:
@@ -196,7 +205,11 @@ def run():
                 save_screenshot(page, timestamp_name("fatal-error"))
             except Exception:
                 pass
-            send_telegram(f"Amazon Shift Catcher stopped with an error:\n{exc}")
+            send_notification(
+                f"Amazon Shift Catcher stopped with an error:\n{exc}",
+                title="Amazon monitor stopped",
+                priority=5,
+            )
         finally:
             stop_alarm()
             context.close()
