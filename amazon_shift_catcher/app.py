@@ -117,6 +117,7 @@ def run():
             "user_data_dir": str(PROFILE_DIR),
             "headless": False,
             "viewport": {"width": 1365, "height": 768},
+            "chromium_sandbox": True,
         }
         if browser_executable:
             launch_kwargs["executable_path"] = browser_executable
