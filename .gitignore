@@ -1,0 +1,25 @@
+# Secrets / personal config
+.env
+config.json
+
+# Browser login/session data
+browser-profile/
+playwright/.auth/
+
+# Runtime output
+logs/
+screenshots/
+state/
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
