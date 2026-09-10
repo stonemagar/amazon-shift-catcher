@@ -59,6 +59,40 @@ def timestamp_name(prefix: str) -> Path:
     return SCREENSHOT_DIR / f"{prefix}-{stamp}.png"
 
 
+def find_browser_executable() -> str | None:
+    """Prefer a user-configured browser path, then auto-detect Brave on Windows."""
+    configured = os.getenv("BROWSER_EXECUTABLE_PATH", "").strip()
+    if configured:
+        expanded = os.path.expandvars(os.path.expanduser(configured))
+        path = Path(expanded)
+        if not path.exists():
+            raise FileNotFoundError(
+                f"BROWSER_EXECUTABLE_PATH does not exist: {expanded}"
+            )
+        return str(path)
+
+    if os.name == "nt":
+        candidates = [
+            Path(r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe"),
+            Path(r"C:\Program Files (x86)\BraveSoftware\Brave-Browser\Application\brave.exe"),
+        ]
+        local_app_data = os.getenv("LOCALAPPDATA")
+        if local_app_data:
+            candidates.append(
+                Path(local_app_data)
+                / "BraveSoftware"
+                / "Brave-Browser"
+                / "Application"
+                / "brave.exe"
+            )
+
+        for candidate in candidates:
+            if candidate.exists():
+                return str(candidate)
+
+    return None
+
+
 def run():
     load_dotenv(ROOT / ".env")
     setup_logging()
@@ -68,17 +102,26 @@ def run():
     rules = config["rules"]
     interval = max(3, int(config.get("check_interval_seconds", 10)))
     auto_apply = env_bool("AUTO_APPLY", False)
+    browser_executable = find_browser_executable()
 
     log.info("Starting Amazon Shift Catcher")
     log.info("AUTO_APPLY=%s", auto_apply)
     log.info("Check interval=%ss", interval)
+    if browser_executable:
+        log.info("Browser executable=%s", browser_executable)
+    else:
+        log.info("No external browser configured/found; using Playwright Chromium")
 
     with sync_playwright() as p:
-        context = p.chromium.launch_persistent_context(
-            user_data_dir=str(PROFILE_DIR),
-            headless=False,
-            viewport={"width": 1365, "height": 768},
-        )
+        launch_kwargs = {
+            "user_data_dir": str(PROFILE_DIR),
+            "headless": False,
+            "viewport": {"width": 1365, "height": 768},
+        }
+        if browser_executable:
+            launch_kwargs["executable_path"] = browser_executable
+
+        context = p.chromium.launch_persistent_context(**launch_kwargs)
         page = context.pages[0] if context.pages else context.new_page()
         page.set_default_timeout(int(config.get("navigation_timeout_seconds", 30)) * 1000)
 
@@ -165,8 +208,8 @@ def run():
                             stop_alarm()
 
                             send_notification(
-                                details +
-                                "\n\nApply was clicked. Version 1 stops here. "
+                                details
+                                + "\n\nApply was clicked. Version 1 stops here. "
                                 "Check the next Amazon page.",
                                 title="AMAZON SHIFT APPLY CLICKED",
                                 priority=5,
@@ -175,8 +218,8 @@ def run():
                             break
                         else:
                             send_notification(
-                                details +
-                                "\n\nAUTO_APPLY is OFF, so Apply was not clicked.",
+                                details
+                                + "\n\nAUTO_APPLY is OFF, so Apply was not clicked.",
                                 title="MATCHING AMAZON SHIFT FOUND",
                                 priority=5,
                             )
