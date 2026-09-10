@@ -1,0 +1,15 @@
+{
+  "my_jobs_url": "https://www.jobsatamazon.co.uk/app#/myapplications",
+  "check_interval_seconds": 10,
+  "navigation_timeout_seconds": 30,
+  "job_id": "JOB-UK-0000000362",
+  "rules": {
+    "max_hours_per_week": 20,
+    "preferred_hours_order": [20, 16, 12],
+    "allowed_days": ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"],
+    "blocked_days": [],
+    "allow_night_shift": true,
+    "earliest_start_time": "00:00",
+    "latest_end_time": "23:59"
+  }
+}
