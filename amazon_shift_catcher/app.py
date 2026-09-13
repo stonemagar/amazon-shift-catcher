@@ -11,10 +11,12 @@ from playwright.sync_api import sync_playwright
 
 from .alarm import start_alarm, stop_alarm
 from .browser import (
+    apply_amazon_preferences,
     page_has_security_challenge,
     reach_shift_page,
     read_shift_cards,
     save_screenshot,
+    wait_for_schedule_settled,
 )
 from .notifier import send_notification
 from .rules import parse_shift, matches_rules, score_shift
@@ -120,7 +122,7 @@ def get_page_status(page) -> tuple[str, str, str | None, str]:
 
 
 def find_available_shift_hours(page, max_hours: float) -> list[float]:
-    """Read visible unfiltered Amazon results and return hours at/below the limit."""
+    """Return visible shift hours that satisfy the maximum after filters are applied."""
     try:
         if "/available-schedule/" not in page.url:
             return []
@@ -143,6 +145,21 @@ def find_available_shift_hours(page, max_hours: float) -> list[float]:
     return sorted(set(matches), reverse=True)
 
 
+def log_preferences(log, prefs: dict) -> None:
+    log.info(
+        "Amazon preferences applied: Desired hours=%s | Days=%s | Time=%s | Sorter=%s",
+        prefs.get("hours"),
+        prefs.get("days"),
+        prefs.get("time"),
+        prefs.get("sorter"),
+    )
+    if not prefs.get("day_option_applied"):
+        log.warning(
+            "Amazon did not expose a literal DAY preset in this Filter layout. "
+            "Hours and ANY-days filter were applied; DAY remains a Python safety check."
+        )
+
+
 def run():
     load_dotenv(ROOT / ".env")
     setup_logging()
@@ -159,8 +176,7 @@ def run():
     log.info("AUTO_APPLY=%s", auto_apply)
     log.info("Check interval=%ss", interval)
     log.info("Desired maximum hours/week=%s", desired_max_hours)
-    log.info("Amazon UI filters are NOT relied on because a page refresh can reset them.")
-    log.info("Python will inspect the visible results after each plain refresh.")
+    log.info("After EVERY refresh Amazon filters will be reapplied before checking shifts.")
     log.info("Connecting to existing Brave session at %s", cdp_url)
 
     with sync_playwright() as p:
@@ -182,12 +198,21 @@ def run():
                 config.get("job_id") or None,
             )
 
-            page.wait_for_timeout(1500)
+            wait_for_schedule_settled(page)
+
+            prefs = apply_amazon_preferences(
+                page,
+                max_hours=desired_max_hours,
+                time_preference="DAY",
+                sorter_name="Hours – most to least",
+            )
+            log_preferences(log, prefs)
 
             send_notification(
                 "Amazon Shift Catcher connected to your existing Brave session.\n"
-                "Amazon page filters are not relied on after refresh.\n"
-                f"Python maximum: {desired_max_hours:g} hours/week\n"
+                f"Desired hours: {prefs['hours']}\n"
+                f"Days: {prefs['days']}\n"
+                f"Sorter: {prefs['sorter']}\n"
                 f"Monitoring every {interval} seconds.\n"
                 f"Auto Apply: {'ON' if auto_apply else 'OFF'}",
                 title="Amazon monitor started",
@@ -212,19 +237,22 @@ def run():
                     log.error("Security challenge detected. Stopping.")
                     break
 
+                # IMPORTANT: this check occurs only AFTER Amazon preferences have
+                # been reapplied for the current page state. If any desired-hours
+                # result appears, we freeze the page and do not refresh again.
                 available_hours = find_available_shift_hours(page, desired_max_hours)
                 if available_hours:
                     hours_text = ", ".join(f"{h:g}" for h in available_hours)
                     log.warning(
-                        "AVAILABLE SHIFT DETECTED at/below %s h/week (visible hours: %s). "
-                        "REFRESHING STOPPED immediately.",
+                        "AVAILABLE SHIFT DETECTED after Amazon filter at/below %s h/week "
+                        "(visible hours: %s). REFRESHING STOPPED immediately.",
                         f"{desired_max_hours:g}",
                         hours_text,
                     )
                     save_screenshot(page, timestamp_name("shift-freeze"))
                     start_alarm()
                     send_notification(
-                        "Amazon shift available.\n"
+                        "Amazon shift available after the desired-hours filter.\n"
                         f"Visible weekly hours: {hours_text}\n"
                         f"Desired maximum: {desired_max_hours:g} hours/week\n\n"
                         "Refreshing has STOPPED so the current shift page stays intact.",
@@ -234,7 +262,7 @@ def run():
                     page.wait_for_timeout(5000)
                     stop_alarm()
                     log.warning(
-                        "Monitor paused/stopped with the live shift page left open in Brave."
+                        "Monitor paused/stopped with the live filtered shift page left open in Brave."
                     )
                     break
 
@@ -318,14 +346,14 @@ def run():
                     url, title, empty_state, excerpt = get_page_status(page)
                     if empty_state:
                         log.info(
-                            'No shift card | Page="%s" | URL=%s | Empty state="%s"',
+                            'No desired shift | Page="%s" | URL=%s | Empty state="%s"',
                             title,
                             url,
                             empty_state,
                         )
                     else:
                         log.warning(
-                            'No shift card | Page="%s" | URL=%s | '
+                            'No desired shift | Page="%s" | URL=%s | '
                             'Expected Amazon empty-state text was NOT found | Visible text="%s"',
                             title,
                             url,
@@ -333,11 +361,24 @@ def run():
                         )
 
                 time.sleep(interval)
+
                 try:
+                    # Amazon resets filters on a normal refresh. Therefore every
+                    # cycle is explicitly: REFRESH -> SETTLE -> FILTER -> SORT -> CHECK.
                     page.reload(wait_until="domcontentloaded", timeout=30000)
-                    page.wait_for_timeout(1500)
+                    wait_for_schedule_settled(page)
+
+                    prefs = apply_amazon_preferences(
+                        page,
+                        max_hours=desired_max_hours,
+                        time_preference="DAY",
+                        sorter_name="Hours – most to least",
+                    )
+                    log_preferences(log, prefs)
                 except Exception:
-                    log.exception("Reload failed. Retrying after interval.")
+                    log.exception(
+                        "Refresh/filter/sort cycle failed. Retrying after the next interval."
+                    )
 
         except KeyboardInterrupt:
             log.info("Stopped by user.")
