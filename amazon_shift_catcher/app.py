@@ -88,8 +88,8 @@ def choose_amazon_page(browser, my_jobs_url: str):
     return page
 
 
-def get_page_status(page) -> tuple[str, str, str | None]:
-    """Return current URL, title, and recognized Amazon no-schedules message."""
+def get_page_status(page) -> tuple[str, str, str | None, str]:
+    """Return URL, title, recognized empty state, and a short visible-text excerpt."""
     try:
         url = page.url
     except Exception:
@@ -101,15 +101,19 @@ def get_page_status(page) -> tuple[str, str, str | None]:
         title = "<unavailable>"
 
     empty_state = None
+    excerpt = "<unavailable>"
     try:
         body_text = page.locator("body").inner_text(timeout=3000)
+        normalized = " ".join(body_text.split())
+        excerpt = normalized[:500] if normalized else "<empty body>"
+
         match = EMPTY_SCHEDULE_RE.search(body_text)
         if match:
             empty_state = " ".join(match.group(0).split())
     except Exception:
         pass
 
-    return url, title, empty_state
+    return url, title, empty_state, excerpt
 
 
 def run():
@@ -146,6 +150,10 @@ def run():
                 config["my_jobs_url"],
                 config.get("job_id") or None,
             )
+
+            # Amazon's schedule page is a JavaScript app. Give it a moment to
+            # render its schedule cards or no-schedules message after navigation.
+            page.wait_for_timeout(1500)
 
             send_notification(
                 "Amazon Shift Catcher connected to your existing Brave session.\n"
@@ -250,7 +258,7 @@ def run():
                         stop_alarm()
                     alerted_for_current_batch = False
 
-                    url, title, empty_state = get_page_status(page)
+                    url, title, empty_state, excerpt = get_page_status(page)
                     if empty_state:
                         log.info(
                             'No shift card | Page="%s" | URL=%s | Empty state="%s"',
@@ -261,14 +269,16 @@ def run():
                     else:
                         log.warning(
                             'No shift card | Page="%s" | URL=%s | '
-                            "Expected Amazon empty-state text was NOT found.",
+                            'Expected Amazon empty-state text was NOT found | Visible text="%s"',
                             title,
                             url,
+                            excerpt,
                         )
 
                 time.sleep(interval)
                 try:
                     page.reload(wait_until="domcontentloaded", timeout=30000)
+                    page.wait_for_timeout(1500)
                 except Exception:
                     log.exception("Reload failed. Retrying after interval.")
 
