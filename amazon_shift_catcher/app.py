@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import re
 import time
 from datetime import datetime
 from pathlib import Path
@@ -22,6 +23,13 @@ from .rules import parse_shift, matches_rules, score_shift
 ROOT = Path(__file__).resolve().parent.parent
 LOG_DIR = ROOT / "logs"
 SCREENSHOT_DIR = ROOT / "screenshots"
+
+EMPTY_SCHEDULE_RE = re.compile(
+    r"Sorry,\s*we do not have any schedules matching your preferences\.\s*"
+    r"We post schedules from Monday to Friday each week\.\s*"
+    r"Please try again at a later time\.",
+    re.I,
+)
 
 
 def setup_logging():
@@ -78,6 +86,30 @@ def choose_amazon_page(browser, my_jobs_url: str):
     page = context.new_page()
     page.goto(my_jobs_url, wait_until="domcontentloaded")
     return page
+
+
+def get_page_status(page) -> tuple[str, str, str | None]:
+    """Return current URL, title, and recognized Amazon no-schedules message."""
+    try:
+        url = page.url
+    except Exception:
+        url = "<unavailable>"
+
+    try:
+        title = " ".join(page.title().split()) or "<no title>"
+    except Exception:
+        title = "<unavailable>"
+
+    empty_state = None
+    try:
+        body_text = page.locator("body").inner_text(timeout=3000)
+        match = EMPTY_SCHEDULE_RE.search(body_text)
+        if match:
+            empty_state = " ".join(match.group(0).split())
+    except Exception:
+        pass
+
+    return url, title, empty_state
 
 
 def run():
@@ -217,7 +249,22 @@ def run():
                     if alerted_for_current_batch:
                         stop_alarm()
                     alerted_for_current_batch = False
-                    log.info("No available shift card detected.")
+
+                    url, title, empty_state = get_page_status(page)
+                    if empty_state:
+                        log.info(
+                            'No shift card | Page="%s" | URL=%s | Empty state="%s"',
+                            title,
+                            url,
+                            empty_state,
+                        )
+                    else:
+                        log.warning(
+                            'No shift card | Page="%s" | URL=%s | '
+                            "Expected Amazon empty-state text was NOT found.",
+                            title,
+                            url,
+                        )
 
                 time.sleep(interval)
                 try:
