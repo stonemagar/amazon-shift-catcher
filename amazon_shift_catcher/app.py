@@ -11,7 +11,6 @@ from playwright.sync_api import sync_playwright
 
 from .alarm import start_alarm, stop_alarm
 from .browser import (
-    ensure_desired_hours_filter,
     page_has_security_challenge,
     reach_shift_page,
     read_shift_cards,
@@ -121,6 +120,7 @@ def get_page_status(page) -> tuple[str, str, str | None, str]:
 
 
 def find_available_shift_hours(page, max_hours: float) -> list[float]:
+    """Read visible unfiltered Amazon results and return hours at/below the limit."""
     try:
         if "/available-schedule/" not in page.url:
             return []
@@ -159,6 +159,8 @@ def run():
     log.info("AUTO_APPLY=%s", auto_apply)
     log.info("Check interval=%ss", interval)
     log.info("Desired maximum hours/week=%s", desired_max_hours)
+    log.info("Amazon UI filters are NOT relied on because a page refresh can reset them.")
+    log.info("Python will inspect the visible results after each plain refresh.")
     log.info("Connecting to existing Brave session at %s", cdp_url)
 
     with sync_playwright() as p:
@@ -182,12 +184,10 @@ def run():
 
             page.wait_for_timeout(1500)
 
-            verified_filter = ensure_desired_hours_filter(page, desired_max_hours)
-            log.info("Amazon filter verified: Desired hours per week = %s", verified_filter)
-
             send_notification(
                 "Amazon Shift Catcher connected to your existing Brave session.\n"
-                f"Desired hours filter verified: {verified_filter}\n"
+                "Amazon page filters are not relied on after refresh.\n"
+                f"Python maximum: {desired_max_hours:g} hours/week\n"
                 f"Monitoring every {interval} seconds.\n"
                 f"Auto Apply: {'ON' if auto_apply else 'OFF'}",
                 title="Amazon monitor started",
