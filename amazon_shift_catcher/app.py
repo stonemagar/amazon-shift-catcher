@@ -30,6 +30,11 @@ EMPTY_SCHEDULE_RE = re.compile(
     r"Please try again at a later time\.",
     re.I,
 )
+SHIFT_COUNT_RE = re.compile(r"Showing\s+\d+\s+of\s+\d+\s+shifts?", re.I)
+SHIFT_HOURS_RE = re.compile(
+    r"\bHours:\s*(\d+(?:\.\d+)?)\s*hours?\s*/\s*week\b",
+    re.I,
+)
 
 
 def setup_logging():
@@ -116,6 +121,35 @@ def get_page_status(page) -> tuple[str, str, str | None, str]:
     return url, title, empty_state, excerpt
 
 
+def find_available_shift_hours(page, max_hours: float) -> list[float]:
+    """Detect visible shift results at or below the desired weekly-hours limit.
+
+    This intentionally looks at Amazon's visible shift-result text, rather than
+    relying on a generic 'Apply' button, because Filter/Sorter panels also have
+    Apply buttons.
+    """
+    try:
+        if "/available-schedule/" not in page.url:
+            return []
+        body_text = page.locator("body").inner_text(timeout=3000)
+    except Exception:
+        return []
+
+    if not SHIFT_COUNT_RE.search(body_text):
+        return []
+
+    matches = []
+    for raw in SHIFT_HOURS_RE.findall(body_text):
+        try:
+            hours = float(raw)
+        except ValueError:
+            continue
+        if hours <= max_hours:
+            matches.append(hours)
+
+    return sorted(set(matches), reverse=True)
+
+
 def run():
     load_dotenv(ROOT / ".env")
     setup_logging()
@@ -126,10 +160,12 @@ def run():
     interval = max(3, int(config.get("check_interval_seconds", 10)))
     auto_apply = env_bool("AUTO_APPLY", False)
     cdp_url = os.getenv("BRAVE_CDP_URL", "http://127.0.0.1:9222").strip()
+    desired_max_hours = float(rules.get("max_hours_per_week", 20))
 
     log.info("Starting Amazon Shift Catcher")
     log.info("AUTO_APPLY=%s", auto_apply)
     log.info("Check interval=%ss", interval)
+    log.info("Desired maximum hours/week=%s", desired_max_hours)
     log.info("Connecting to existing Brave session at %s", cdp_url)
 
     with sync_playwright() as p:
@@ -179,6 +215,40 @@ def run():
                         priority=5,
                     )
                     log.error("Security challenge detected. Stopping.")
+                    break
+
+                # Critical rule: the moment Amazon displays any shift at or below
+                # the desired weekly-hours limit, DO NOT reload again. This keeps
+                # the live result page intact so the shift is not lost to another
+                # refresh while it is being inspected/selected.
+                available_hours = find_available_shift_hours(page, desired_max_hours)
+                if available_hours:
+                    hours_text = ", ".join(
+                        f"{h:g}" for h in available_hours
+                    )
+                    log.warning(
+                        "AVAILABLE SHIFT DETECTED at/below %s h/week (visible hours: %s). "
+                        "REFRESHING STOPPED immediately.",
+                        f"{desired_max_hours:g}",
+                        hours_text,
+                    )
+                    save_screenshot(page, timestamp_name("shift-freeze"))
+                    start_alarm()
+                    send_notification(
+                        "Amazon shift available.\n"
+                        f"Visible weekly hours: {hours_text}\n"
+                        f"Desired maximum: {desired_max_hours:g} hours/week\n\n"
+                        "Refreshing has STOPPED so the current shift page stays intact.",
+                        title="AMAZON SHIFT - REFRESH STOPPED",
+                        priority=5,
+                    )
+                    # Give the alarm a few seconds, then leave the Brave page open
+                    # exactly as it is. No further page.reload() call is made.
+                    page.wait_for_timeout(5000)
+                    stop_alarm()
+                    log.warning(
+                        "Monitor paused/stopped with the live shift page left open in Brave."
+                    )
                     break
 
                 cards = read_shift_cards(page)
