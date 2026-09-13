@@ -4,6 +4,7 @@ config.json
 
 # Browser login/session data
 browser-profile/
+brave-manual-profile/
 playwright/.auth/
 
 # Runtime output
