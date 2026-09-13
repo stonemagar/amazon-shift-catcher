@@ -22,7 +22,6 @@ from .rules import parse_shift, matches_rules, score_shift
 ROOT = Path(__file__).resolve().parent.parent
 LOG_DIR = ROOT / "logs"
 SCREENSHOT_DIR = ROOT / "screenshots"
-PROFILE_DIR = ROOT / "browser-profile"
 
 
 def setup_logging():
@@ -59,38 +58,26 @@ def timestamp_name(prefix: str) -> Path:
     return SCREENSHOT_DIR / f"{prefix}-{stamp}.png"
 
 
-def find_browser_executable() -> str | None:
-    """Prefer a user-configured browser path, then auto-detect Brave on Windows."""
-    configured = os.getenv("BROWSER_EXECUTABLE_PATH", "").strip()
-    if configured:
-        expanded = os.path.expandvars(os.path.expanduser(configured))
-        path = Path(expanded)
-        if not path.exists():
-            raise FileNotFoundError(
-                f"BROWSER_EXECUTABLE_PATH does not exist: {expanded}"
-            )
-        return str(path)
+def choose_amazon_page(browser, my_jobs_url: str):
+    """Prefer an already-open Amazon Jobs tab in the attached Brave session."""
+    pages = []
+    for context in browser.contexts:
+        pages.extend(context.pages)
 
-    if os.name == "nt":
-        candidates = [
-            Path(r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe"),
-            Path(r"C:\Program Files (x86)\BraveSoftware\Brave-Browser\Application\brave.exe"),
-        ]
-        local_app_data = os.getenv("LOCALAPPDATA")
-        if local_app_data:
-            candidates.append(
-                Path(local_app_data)
-                / "BraveSoftware"
-                / "Brave-Browser"
-                / "Application"
-                / "brave.exe"
-            )
+    for page in pages:
+        try:
+            if "jobsatamazon.co.uk" in page.url.lower():
+                return page
+        except Exception:
+            pass
 
-        for candidate in candidates:
-            if candidate.exists():
-                return str(candidate)
+    if not browser.contexts:
+        raise RuntimeError("No browser context found in the attached Brave session.")
 
-    return None
+    context = browser.contexts[0]
+    page = context.new_page()
+    page.goto(my_jobs_url, wait_until="domcontentloaded")
+    return page
 
 
 def run():
@@ -102,28 +89,23 @@ def run():
     rules = config["rules"]
     interval = max(3, int(config.get("check_interval_seconds", 10)))
     auto_apply = env_bool("AUTO_APPLY", False)
-    browser_executable = find_browser_executable()
+    cdp_url = os.getenv("BRAVE_CDP_URL", "http://127.0.0.1:9222").strip()
 
     log.info("Starting Amazon Shift Catcher")
     log.info("AUTO_APPLY=%s", auto_apply)
     log.info("Check interval=%ss", interval)
-    if browser_executable:
-        log.info("Browser executable=%s", browser_executable)
-    else:
-        log.info("No external browser configured/found; using Playwright Chromium")
+    log.info("Connecting to existing Brave session at %s", cdp_url)
 
     with sync_playwright() as p:
-        launch_kwargs = {
-            "user_data_dir": str(PROFILE_DIR),
-            "headless": False,
-            "viewport": {"width": 1365, "height": 768},
-            "chromium_sandbox": True,
-        }
-        if browser_executable:
-            launch_kwargs["executable_path"] = browser_executable
+        try:
+            browser = p.chromium.connect_over_cdp(cdp_url)
+        except Exception as exc:
+            raise RuntimeError(
+                "Could not connect to Brave. Start Brave with remote debugging on port 9222, "
+                "log in to Amazon Jobs, leave Brave open, then run this program."
+            ) from exc
 
-        context = p.chromium.launch_persistent_context(**launch_kwargs)
-        page = context.pages[0] if context.pages else context.new_page()
+        page = choose_amazon_page(browser, config["my_jobs_url"])
         page.set_default_timeout(int(config.get("navigation_timeout_seconds", 30)) * 1000)
 
         try:
@@ -134,7 +116,7 @@ def run():
             )
 
             send_notification(
-                "Amazon Shift Catcher started.\n"
+                "Amazon Shift Catcher connected to your existing Brave session.\n"
                 f"Monitoring every {interval} seconds.\n"
                 f"Auto Apply: {'ON' if auto_apply else 'OFF'}",
                 title="Amazon monitor started",
@@ -144,6 +126,9 @@ def run():
             alerted_for_current_batch = False
 
             while True:
+                if page.is_closed():
+                    raise RuntimeError("The Amazon Jobs tab was closed.")
+
                 if page_has_security_challenge(page):
                     start_alarm()
                     save_screenshot(page, timestamp_name("security-challenge"))
@@ -246,7 +231,8 @@ def run():
             log.exception("Fatal error")
             start_alarm()
             try:
-                save_screenshot(page, timestamp_name("fatal-error"))
+                if not page.is_closed():
+                    save_screenshot(page, timestamp_name("fatal-error"))
             except Exception:
                 pass
             send_notification(
@@ -256,4 +242,4 @@ def run():
             )
         finally:
             stop_alarm()
-            context.close()
+            log.info("Disconnected from automation. Brave has been left open.")
