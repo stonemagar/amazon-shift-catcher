@@ -11,6 +11,7 @@ from playwright.sync_api import sync_playwright
 
 from .alarm import start_alarm, stop_alarm
 from .browser import (
+    ensure_desired_hours_filter,
     page_has_security_challenge,
     reach_shift_page,
     read_shift_cards,
@@ -72,7 +73,6 @@ def timestamp_name(prefix: str) -> Path:
 
 
 def choose_amazon_page(browser, my_jobs_url: str):
-    """Prefer an already-open Amazon Jobs tab in the attached Brave session."""
     pages = []
     for context in browser.contexts:
         pages.extend(context.pages)
@@ -94,7 +94,6 @@ def choose_amazon_page(browser, my_jobs_url: str):
 
 
 def get_page_status(page) -> tuple[str, str, str | None, str]:
-    """Return URL, title, recognized empty state, and a short visible-text excerpt."""
     try:
         url = page.url
     except Exception:
@@ -122,12 +121,6 @@ def get_page_status(page) -> tuple[str, str, str | None, str]:
 
 
 def find_available_shift_hours(page, max_hours: float) -> list[float]:
-    """Detect visible shift results at or below the desired weekly-hours limit.
-
-    This intentionally looks at Amazon's visible shift-result text, rather than
-    relying on a generic 'Apply' button, because Filter/Sorter panels also have
-    Apply buttons.
-    """
     try:
         if "/available-schedule/" not in page.url:
             return []
@@ -187,12 +180,14 @@ def run():
                 config.get("job_id") or None,
             )
 
-            # Amazon's schedule page is a JavaScript app. Give it a moment to
-            # render its schedule cards or no-schedules message after navigation.
             page.wait_for_timeout(1500)
+
+            verified_filter = ensure_desired_hours_filter(page, desired_max_hours)
+            log.info("Amazon filter verified: Desired hours per week = %s", verified_filter)
 
             send_notification(
                 "Amazon Shift Catcher connected to your existing Brave session.\n"
+                f"Desired hours filter verified: {verified_filter}\n"
                 f"Monitoring every {interval} seconds.\n"
                 f"Auto Apply: {'ON' if auto_apply else 'OFF'}",
                 title="Amazon monitor started",
@@ -217,15 +212,9 @@ def run():
                     log.error("Security challenge detected. Stopping.")
                     break
 
-                # Critical rule: the moment Amazon displays any shift at or below
-                # the desired weekly-hours limit, DO NOT reload again. This keeps
-                # the live result page intact so the shift is not lost to another
-                # refresh while it is being inspected/selected.
                 available_hours = find_available_shift_hours(page, desired_max_hours)
                 if available_hours:
-                    hours_text = ", ".join(
-                        f"{h:g}" for h in available_hours
-                    )
+                    hours_text = ", ".join(f"{h:g}" for h in available_hours)
                     log.warning(
                         "AVAILABLE SHIFT DETECTED at/below %s h/week (visible hours: %s). "
                         "REFRESHING STOPPED immediately.",
@@ -242,8 +231,6 @@ def run():
                         title="AMAZON SHIFT - REFRESH STOPPED",
                         priority=5,
                     )
-                    # Give the alarm a few seconds, then leave the Brave page open
-                    # exactly as it is. No further page.reload() call is made.
                     page.wait_for_timeout(5000)
                     stop_alarm()
                     log.warning(
@@ -254,7 +241,7 @@ def run():
                 cards = read_shift_cards(page)
 
                 if cards:
-                    log.info("%d visible Apply button(s) / shift card(s) detected", len(cards))
+                    log.info("%d visible shift action(s) detected", len(cards))
 
                     if not alerted_for_current_batch:
                         start_alarm()
