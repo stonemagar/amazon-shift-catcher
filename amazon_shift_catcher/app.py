@@ -61,6 +61,53 @@ def load_config():
     return json.loads(config_path.read_text(encoding="utf-8"))
 
 
+def choose_desired_hours(default_hours: float) -> float:
+    """Ask the user which Amazon Desired-hours filter to use for this run."""
+    options = {
+        "1": 10.0,
+        "2": 20.0,
+        "3": 30.0,
+        "4": 40.0,
+    }
+    direct_values = {10.0, 20.0, 30.0, 40.0}
+
+    print("\n" + "=" * 58)
+    print("AMAZON SHIFT CATCHER - DESIRED HOURS")
+    print("Choose the maximum weekly hours for this run:")
+    print("  1. Up to 10 hours")
+    print("  2. Up to 20 hours")
+    print("  3. Up to 30 hours")
+    print("  4. Up to 40 hours")
+    print(f"Press Enter to keep config default: Up to {default_hours:g} hours")
+    print("=" * 58)
+
+    while True:
+        choice = input("Select 1-4 (or type 10/20/30/40): ").strip()
+
+        if choice == "":
+            selected = float(default_hours)
+            break
+
+        if choice in options:
+            selected = options[choice]
+            break
+
+        try:
+            typed = float(choice)
+        except ValueError:
+            typed = -1
+
+        if typed in direct_values:
+            selected = typed
+            break
+
+        print("Invalid choice. Please select 1, 2, 3, 4, or type 10/20/30/40.")
+
+    print(f"\nSelected: Up to {selected:g} hours/week")
+    print("Starting monitor...\n")
+    return selected
+
+
 def env_bool(name: str, default: bool = False) -> bool:
     value = os.getenv(name)
     if value is None:
@@ -162,15 +209,27 @@ def log_preferences(log, prefs: dict) -> None:
 
 def run():
     load_dotenv(ROOT / ".env")
+
+    # Ask before browser automation/logging begins. The choice is only for this
+    # run; config.json is not modified.
+    config = load_config()
+    rules = config["rules"]
+    configured_hours = float(rules.get("max_hours_per_week", 20))
+    desired_max_hours = choose_desired_hours(configured_hours)
+
+    # Keep all Python-side checks consistent with the value chosen at startup.
+    rules["max_hours_per_week"] = desired_max_hours
+    if desired_max_hours.is_integer():
+        rules["preferred_hours_order"] = list(
+            range(int(desired_max_hours), 3, -1)
+        )
+
     setup_logging()
     log = logging.getLogger("shift-catcher")
 
-    config = load_config()
-    rules = config["rules"]
     interval = max(3, int(config.get("check_interval_seconds", 10)))
     auto_apply = env_bool("AUTO_APPLY", False)
     cdp_url = os.getenv("BRAVE_CDP_URL", "http://127.0.0.1:9222").strip()
-    desired_max_hours = float(rules.get("max_hours_per_week", 20))
 
     log.info("Starting Amazon Shift Catcher")
     log.info("AUTO_APPLY=%s", auto_apply)
