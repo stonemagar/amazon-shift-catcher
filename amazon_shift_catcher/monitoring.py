@@ -40,6 +40,13 @@ class SessionMetrics:
     _check_interval_samples: int = field(default=0, repr=False)
     check_interval_max_seconds: float = 0.0
 
+    # Normal monitoring timing is tracked separately so deliberate 403 pauses do
+    # not inflate the real shift-check interval.
+    _normal_last_check_monotonic: Optional[float] = field(default=None, repr=False)
+    _normal_check_interval_total: float = field(default=0.0, repr=False)
+    _normal_check_interval_samples: int = field(default=0, repr=False)
+    normal_check_interval_max_seconds: float = 0.0
+
     reload_cycles: int = 0
     reload_total_seconds: float = 0.0
     reload_max_seconds: float = 0.0
@@ -47,7 +54,10 @@ class SessionMetrics:
     blocked_events: int = 0
     blocked_total_seconds: float = 0.0
     blocked_max_seconds: float = 0.0
+    blocked_durations: list[float] = field(default_factory=list)
     recovery_tests: int = 0
+    manual_recovery_count: int = 0
+    automatic_recovery_count: int = 0
 
     shift_batches_seen: int = 0
     priority_shift_batches_seen: int = 0
@@ -73,6 +83,23 @@ class SessionMetrics:
             entry["reason"] = reason
         self.state_history.append(entry)
 
+        # Break the normal-check timing chain when a 403 pause begins and again
+        # when normal monitoring resumes. This prevents the blocked period from
+        # being counted as a normal monitoring interval.
+        if new_state == MonitorState.PAUSED_403:
+            self._normal_last_check_monotonic = None
+
+        if (
+            new_state == MonitorState.MONITORING
+            and old_state in {MonitorState.PAUSED_403.value, MonitorState.RECOVERING.value}
+        ):
+            self._normal_last_check_monotonic = None
+            reason_lower = (reason or "").lower()
+            if "automatic recovery reload" in reason_lower:
+                self.automatic_recovery_count += 1
+            elif "manual" in reason_lower or "current page" in reason_lower:
+                self.manual_recovery_count += 1
+
         if old_state != new_state.value:
             if reason:
                 log.info("STATE %s -> %s | %s", old_state, new_state.value, reason)
@@ -82,6 +109,8 @@ class SessionMetrics:
     def mark_check(self) -> None:
         now = time.monotonic()
         self.checks_total += 1
+
+        # Legacy/all-state interval metric. Kept for backward compatibility.
         if self._last_check_monotonic is not None:
             interval = now - self._last_check_monotonic
             self._check_interval_total += interval
@@ -92,15 +121,30 @@ class SessionMetrics:
             )
         self._last_check_monotonic = now
 
+        # Real normal monitoring interval: only samples while MONITORING and the
+        # baseline is reset across 403 recovery periods.
+        if self.state == MonitorState.MONITORING.value:
+            if self._normal_last_check_monotonic is not None:
+                normal_interval = now - self._normal_last_check_monotonic
+                self._normal_check_interval_total += normal_interval
+                self._normal_check_interval_samples += 1
+                self.normal_check_interval_max_seconds = max(
+                    self.normal_check_interval_max_seconds,
+                    normal_interval,
+                )
+            self._normal_last_check_monotonic = now
+
     def record_reload(self, seconds: float) -> None:
         self.reload_cycles += 1
         self.reload_total_seconds += max(0.0, seconds)
         self.reload_max_seconds = max(self.reload_max_seconds, seconds)
 
     def record_403(self, seconds: float, tests: int) -> None:
+        observed = max(0.0, seconds)
         self.blocked_events += 1
-        self.blocked_total_seconds += max(0.0, seconds)
-        self.blocked_max_seconds = max(self.blocked_max_seconds, seconds)
+        self.blocked_total_seconds += observed
+        self.blocked_max_seconds = max(self.blocked_max_seconds, observed)
+        self.blocked_durations.append(observed)
         self.recovery_tests += max(0, tests)
 
     def record_shift_batch(self, visible_count: int, priority_count: int) -> None:
@@ -129,6 +173,11 @@ class SessionMetrics:
             if self._check_interval_samples
             else 0.0
         )
+        normal_avg_check = (
+            self._normal_check_interval_total / self._normal_check_interval_samples
+            if self._normal_check_interval_samples
+            else 0.0
+        )
         avg_reload = (
             self.reload_total_seconds / self.reload_cycles
             if self.reload_cycles
@@ -150,6 +199,11 @@ class SessionMetrics:
             "checks_total": self.checks_total,
             "average_check_interval_seconds": round(avg_check, 3),
             "max_check_interval_seconds": round(self.check_interval_max_seconds, 3),
+            "normal_average_check_interval": round(normal_avg_check, 3),
+            "normal_max_check_interval_seconds": round(
+                self.normal_check_interval_max_seconds,
+                3,
+            ),
             "reload_cycles": self.reload_cycles,
             "average_reload_seconds": round(avg_reload, 3),
             "max_reload_seconds": round(self.reload_max_seconds, 3),
@@ -157,6 +211,16 @@ class SessionMetrics:
             "403_average_duration_seconds": round(avg_403, 3),
             "403_max_duration_seconds": round(self.blocked_max_seconds, 3),
             "403_recovery_tests": self.recovery_tests,
+            # Requested professional recovery metrics:
+            # - 403_pause_time: cumulative seconds normal monitoring was paused.
+            # - 403_observed_duration: average observed 403 duration per event.
+            "403_pause_time": round(self.blocked_total_seconds, 3),
+            "403_observed_duration": round(avg_403, 3),
+            "403_observed_durations": [
+                round(value, 3) for value in self.blocked_durations
+            ],
+            "manual_recovery_count": self.manual_recovery_count,
+            "automatic_recovery_count": self.automatic_recovery_count,
             "shift_batches_seen": self.shift_batches_seen,
             "priority_shift_batches_seen": self.priority_shift_batches_seen,
             "visible_shifts_seen": self.visible_shifts_seen,
