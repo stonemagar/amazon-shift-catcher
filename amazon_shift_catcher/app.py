@@ -27,6 +27,7 @@ ROOT = Path(__file__).resolve().parent.parent
 LOG_DIR = ROOT / "logs"
 SCREENSHOT_DIR = ROOT / "screenshots"
 BLOCKED_RETRY_SECONDS = 60
+PASSIVE_RECOVERY_POLL_SECONDS = 1.0
 
 EMPTY_SCHEDULE_RE = re.compile(
     r"(Sorry,\s*we do not have any schedules matching your preferences(?:\.\s*"
@@ -184,8 +185,118 @@ def get_blocked_page_status(page) -> tuple[bool, str]:
     return blocked, excerpt
 
 
+def get_passive_recovery_state(page) -> tuple[str, str]:
+    """Inspect the already-loaded page without causing an automatic navigation/reload."""
+    if page.is_closed():
+        return "closed", ""
+
+    try:
+        url = page.url.lower()
+    except Exception:
+        url = ""
+
+    try:
+        title = page.title()
+    except Exception:
+        title = ""
+
+    try:
+        body_text = page.locator("body").inner_text(timeout=1000)
+    except Exception:
+        return "loading", ""
+
+    excerpt = " ".join(body_text.split())[:500]
+    combined = f"{title}\n{body_text}"
+    if BLOCKED_PAGE_RE.search(combined):
+        return "blocked", excerpt
+
+    try:
+        if page_has_security_challenge(page):
+            return "security", excerpt
+    except Exception:
+        pass
+
+    is_schedule_url = (
+        "jobsatamazon.co.uk" in url and "/selfservice/schedule/" in url
+    )
+    if is_schedule_url and (
+        SHIFT_COUNT_RE.search(body_text) or EMPTY_SCHEDULE_RE.search(body_text)
+    ):
+        return "schedule", excerpt
+
+    normalized_lower = " ".join(body_text.lower().split())
+    if (
+        is_schedule_url
+        and "select work shift" in normalized_lower
+        and "loading..." not in normalized_lower
+    ):
+        return "schedule", excerpt
+
+    return "loading", excerpt
+
+
+def wait_for_passive_403_recovery(page, log, seconds: float) -> str:
+    """Watch the current DOM so a user's manual refresh can be noticed immediately."""
+    deadline = time.monotonic() + seconds
+
+    while True:
+        state, _ = get_passive_recovery_state(page)
+        if state in {"schedule", "security", "closed"}:
+            if state != "closed":
+                log.warning(
+                    "Passive 403 recovery watcher detected current page state=%s. "
+                    "No automatic reload was needed.",
+                    state,
+                )
+            return state
+
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return "timeout"
+
+        time.sleep(min(PASSIVE_RECOVERY_POLL_SECONDS, remaining))
+
+
+def finish_403_recovery(
+    log,
+    metrics: SessionMetrics,
+    started_monotonic: float,
+    recovery_tests: int,
+    source: str,
+) -> bool:
+    elapsed = time.monotonic() - started_monotonic
+    metrics.record_403(elapsed, recovery_tests)
+    metrics.transition(
+        MonitorState.MONITORING,
+        log,
+        f"403 cleared after {int(elapsed)} seconds ({source})",
+    )
+    log.warning(
+        "403 CLEARED after %s seconds; automatic recovery tests=%s; source=%s.",
+        int(elapsed),
+        recovery_tests,
+        source,
+    )
+    tracked_notification(
+        metrics,
+        f"Amazon page is no longer showing the 403 after about {int(elapsed)} seconds.\n"
+        f"Recovery source: {source}.\n"
+        "Normal all-shift monitoring will resume now.",
+        title="Amazon 403 cleared",
+        priority=4,
+    )
+    return True
+
+
 def recover_from_403(page, log, excerpt: str, metrics: SessionMetrics) -> bool:
-    """Pause normal monitoring and make one recovery test every 60 seconds."""
+    """
+    Pause normal monitoring after a 403.
+
+    The catcher makes at most one automatic test reload every 60 seconds. During each
+    wait it passively inspects the already-loaded DOM once per second. This means a
+    manual browser refresh that clears the 403 can be recognised without waiting for
+    the next 60-second automatic test and without adding extra automatic reloads.
+    """
     started_at = datetime.now()
     started_monotonic = time.monotonic()
     attempt = 0
@@ -212,30 +323,80 @@ def recover_from_403(page, log, excerpt: str, metrics: SessionMetrics) -> bool:
         metrics,
         "Amazon returned a 403 / Request blocked page.\n"
         "Normal monitoring is PAUSED.\n"
-        f"The catcher will wait {BLOCKED_RETRY_SECONDS} seconds, then make one recovery test.\n"
-        "If the page is still blocked it will wait another 60 seconds before testing again.",
+        f"The catcher will make no automatic reload for {BLOCKED_RETRY_SECONDS} seconds.\n"
+        "If you manually refresh Brave and the normal shift page returns, the catcher will detect it and resume automatically.\n"
+        f"If it stays blocked, one automatic recovery test is made every {BLOCKED_RETRY_SECONDS} seconds.",
         title="Amazon 403 - recovery mode",
         priority=5,
     )
 
     while True:
-        attempt += 1
         log.warning(
-            "403 recovery attempt %s: no requests for %s seconds, then one test reload.",
-            attempt,
+            "403 recovery wait: no automatic reload for up to %s seconds. "
+            "Passive current-page watcher is active every %.0f second(s); manual refresh is allowed.",
+            BLOCKED_RETRY_SECONDS,
+            PASSIVE_RECOVERY_POLL_SECONDS,
+        )
+
+        passive_state = wait_for_passive_403_recovery(
+            page,
+            log,
             BLOCKED_RETRY_SECONDS,
         )
-        time.sleep(BLOCKED_RETRY_SECONDS)
 
-        if page.is_closed():
+        if passive_state == "closed":
             metrics.record_error("Amazon tab closed during 403 recovery")
             return False
 
+        if passive_state == "security":
+            return finish_403_recovery(
+                log,
+                metrics,
+                started_monotonic,
+                attempt,
+                "current page left 403 and reached security/verification",
+            )
+
+        if passive_state == "schedule":
+            try:
+                wait_for_schedule_settled(page)
+            except Exception as exc:
+                log.warning(
+                    "Current page appears recovered but has not fully settled yet: %s",
+                    exc,
+                )
+
+            blocked, _ = get_blocked_page_status(page)
+            if not blocked:
+                return finish_403_recovery(
+                    log,
+                    metrics,
+                    started_monotonic,
+                    attempt,
+                    "manual/current-page refresh detected",
+                )
+
+            log.warning(
+                "The page briefly looked recovered but the 403 returned. Remaining in recovery mode."
+            )
+            metrics.transition(
+                MonitorState.PAUSED_403,
+                log,
+                "403 returned after passive recovery check",
+            )
+            continue
+
+        attempt += 1
         metrics.transition(
             MonitorState.RECOVERING,
             log,
-            f"403 recovery test {attempt}",
+            f"403 automatic recovery test {attempt}",
         )
+        log.warning(
+            "403 automatic recovery test %s: performing one reload after the quiet period.",
+            attempt,
+        )
+
         try:
             page.reload(wait_until="domcontentloaded", timeout=30000)
         except Exception as exc:
@@ -255,12 +416,12 @@ def recover_from_403(page, log, excerpt: str, metrics: SessionMetrics) -> bool:
             metrics.transition(
                 MonitorState.PAUSED_403,
                 log,
-                f"403 still active after recovery test {attempt}",
+                f"403 still active after automatic recovery test {attempt}",
             )
             log.warning(
-                "403 is still present after recovery attempt %s. Waiting another %s seconds.",
+                "403 is still present after automatic recovery test %s. "
+                "Returning to passive recovery wait.",
                 attempt,
-                BLOCKED_RETRY_SECONDS,
             )
             if latest_excerpt:
                 log.debug("Blocked-page excerpt: %s", latest_excerpt)
@@ -276,30 +437,17 @@ def recover_from_403(page, log, excerpt: str, metrics: SessionMetrics) -> bool:
             metrics.transition(
                 MonitorState.PAUSED_403,
                 log,
-                "403 returned during recovery verification",
+                "403 returned during automatic recovery verification",
             )
             continue
 
-        elapsed = time.monotonic() - started_monotonic
-        metrics.record_403(elapsed, attempt)
-        metrics.transition(
-            MonitorState.MONITORING,
+        return finish_403_recovery(
             log,
-            f"403 recovered after {int(elapsed)} seconds",
-        )
-        log.warning(
-            "403 RECOVERED after %s seconds and %s recovery test(s).",
-            int(elapsed),
-            attempt,
-        )
-        tracked_notification(
             metrics,
-            f"Amazon page recovered from the 403 after about {int(elapsed)} seconds.\n"
-            "Normal all-shift monitoring will resume.",
-            title="Amazon 403 recovered",
-            priority=4,
+            started_monotonic,
+            attempt,
+            "automatic recovery reload",
         )
-        return True
 
 
 def find_all_available_shift_hours(page) -> list[float]:
@@ -455,7 +603,11 @@ def run():
     log.info("Starting Amazon Shift Catcher")
     log.info("Session ID=%s", metrics.session_id)
     log.info("Check interval=%ss", interval)
-    log.info("403 recovery interval=%ss", BLOCKED_RETRY_SECONDS)
+    log.info("403 automatic recovery interval=%ss", BLOCKED_RETRY_SECONDS)
+    log.info(
+        "403 passive recovery watcher=%.0fs DOM check; no automatic reload is added by the watcher.",
+        PASSIVE_RECOVERY_POLL_SECONDS,
+    )
     log.info("Priority weekly hours=%s", selected_priority_hours)
     log.info(
         "Priority mode: no desired-hours filter is imposed by the catcher. "
@@ -511,7 +663,8 @@ def run():
                 "Amazon desired-hours filter: not used by the catcher\n"
                 "All visible Amazon shifts will be detected.\n"
                 f"Monitoring interval: {interval} seconds.\n"
-                f"403 recovery test: every {BLOCKED_RETRY_SECONDS} seconds while blocked.",
+                f"403 automatic recovery test: every {BLOCKED_RETRY_SECONDS} seconds while blocked.\n"
+                "Manual refresh during 403 recovery is detected automatically.",
                 title="Amazon monitor started - priority mode",
                 priority=3,
             )
