@@ -15,7 +15,8 @@ SECURITY_TEXT = re.compile(
 )
 SELECT_SHIFT_RE = re.compile(r"^\s*Select Shift\s*$", re.I)
 EMPTY_SCHEDULE_TEXT = re.compile(
-    r"Sorry,\s*we do not have any schedules matching your preferences",
+    r"(Sorry,\s*we do not have any schedules matching your preferences|"
+    r"We do not have any schedules available at this time)",
     re.I,
 )
 SHIFT_COUNT_TEXT = re.compile(r"Showing\s+\d+\s+of\s+\d+\s+shifts?", re.I)
@@ -187,12 +188,7 @@ def _click_panel_apply(panel, panel_name: str) -> None:
 
 
 def _close_side_panel(page: Page, panel, panel_name: str) -> None:
-    """Close an Amazon Filter/Sorter drawer after Apply.
-
-    The current Amazon UI can leave the drawer open after Apply. If Filter stays
-    open, the Sorter trigger behind it is not visible, which caused the previous
-    'Could not find Sort/Sorter control' failure.
-    """
+    """Close an Amazon Filter/Sorter drawer after Apply."""
     candidates = [
         panel.get_by_role("button", name=re.compile(r"(close|dismiss)", re.I)),
         panel.locator(
@@ -212,8 +208,6 @@ def _close_side_panel(page: Page, panel, panel_name: str) -> None:
             except Exception:
                 pass
 
-    # Amazon's drawer currently responds to Escape in Brave. This is only UI
-    # navigation; it does not change the already-applied filter values.
     try:
         page.keyboard.press("Escape")
         page.wait_for_timeout(300)
@@ -344,7 +338,7 @@ def _set_desired_hours_by_visible_text(page: Page, panel, max_hours: float) -> s
 
 
 def _try_set_day_time_preference(page: Page, panel, preference: str) -> bool:
-    """Use a literal DAY option when Amazon exposes one in this UI."""
+    """Use a literal Amazon DAY option when the current UI exposes one."""
     if not preference:
         return False
 
@@ -392,9 +386,6 @@ def apply_amazon_filter(
     _click_panel_apply(panel, "Filter")
     page.wait_for_timeout(350)
     wait_for_schedule_settled(page)
-
-    # Important: Amazon can leave this drawer open after Apply. Close it before
-    # trying to locate the Sorter control on the schedule page.
     _close_side_panel(page, panel, "Filter")
 
     return {
@@ -403,7 +394,7 @@ def apply_amazon_filter(
         "time": (
             time_preference
             if day_option_applied
-            else "DAY guard in Python"
+            else "NOT APPLIED - no literal DAY preset"
         ),
         "day_option_applied": day_option_applied,
     }
@@ -434,45 +425,23 @@ def apply_amazon_sorter(
     page: Page,
     sorter_name: str = "Hours – most to least",
 ) -> str:
-    """Set Amazon Sorter to Hours - most to least.
-
-    Sorting is useful for presentation/ranking, but it is not allowed to kill
-    monitoring if Amazon changes the Sorter trigger. The 20-hour Filter remains
-    the essential gate and Python still stops on any desired-hours result.
-    """
+    """Optional sorter helper retained for manual/future use."""
     trigger = _find_sorter_trigger(page)
     if trigger is None:
-        log.warning(
-            "Amazon Sorter control was not found after Filter was applied. "
-            "Continuing with the verified hours filter; sorter will be retried "
-            "after the next refresh."
-        )
         return "NOT APPLIED - control not found"
 
     try:
         trigger.click(timeout=5000)
-    except Exception as exc:
-        log.warning(
-            "Amazon Sorter trigger was found but could not be opened (%s). "
-            "Continuing with the hours filter.",
-            exc,
-        )
+    except Exception:
         return "NOT APPLIED - could not open"
 
     page.wait_for_timeout(250)
-
-    heading = _visible_first(
-        page.get_by_text("Choose sorter order", exact=True)
-    )
+    heading = _visible_first(page.get_by_text("Choose sorter order", exact=True))
     if heading is None:
         heading = _visible_first(
             page.get_by_text(re.compile(r"^\s*Sorter\s*$", re.I))
         )
     if heading is None:
-        log.warning(
-            "Sorter was opened but its panel heading was not recognized. "
-            "Continuing with the hours filter."
-        )
         try:
             page.keyboard.press("Escape")
         except Exception:
@@ -483,10 +452,6 @@ def apply_amazon_sorter(
     if panel is None:
         panel = _panel_ancestor(heading, "Choose sorter order")
     if panel is None:
-        log.warning(
-            "Could not identify the Amazon Sorter panel safely. "
-            "Continuing with the hours filter."
-        )
         try:
             page.keyboard.press("Escape")
         except Exception:
@@ -499,10 +464,6 @@ def apply_amazon_sorter(
     )
     option = _visible_first(panel.get_by_text(desired_re))
     if option is None:
-        log.warning(
-            "Amazon Sorter does not expose 'Hours – most to least' in the "
-            "recognized panel. Continuing with the hours filter."
-        )
         _close_side_panel(page, panel, "Sorter")
         return "NOT APPLIED - option not found"
 
@@ -511,12 +472,7 @@ def apply_amazon_sorter(
     except Exception:
         try:
             option.locator("xpath=..").click(timeout=3000)
-        except Exception as exc:
-            log.warning(
-                "Could not select 'Hours – most to least' (%s). "
-                "Continuing with the hours filter.",
-                exc,
-            )
+        except Exception:
             _close_side_panel(page, panel, "Sorter")
             return "NOT APPLIED - option click failed"
 
@@ -534,14 +490,18 @@ def apply_amazon_preferences(
     time_preference: str = "DAY",
     sorter_name: str = "Hours – most to least",
 ) -> dict:
-    """Apply Filter then try Sorter after each page refresh."""
+    """Apply only the essential Filter after each refresh.
+
+    The sorter is intentionally skipped during monitoring to reduce UI actions
+    and shorten the time between checks. The desired-hours Filter is the gate
+    used for detection.
+    """
     filter_status = apply_amazon_filter(
         page,
         max_hours,
         time_preference,
     )
-    sorter_value = apply_amazon_sorter(page, sorter_name)
-    filter_status["sorter"] = sorter_value
+    filter_status["sorter"] = "SKIPPED - faster monitoring"
     return filter_status
 
 
@@ -598,7 +558,6 @@ def read_shift_cards(page: Page) -> list[dict]:
 
         text = _candidate_card_text(button)
 
-        # Never treat the Filter/Sorter Apply controls as shift actions.
         if not re.search(
             r"(hours?\s*/\s*week|hours?\s*per\s*week|Start date|Shift:)",
             text,
