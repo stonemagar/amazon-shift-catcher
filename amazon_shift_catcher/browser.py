@@ -20,6 +20,10 @@ EMPTY_SCHEDULE_TEXT = re.compile(
     re.I,
 )
 SHIFT_COUNT_TEXT = re.compile(r"Showing\s+\d+\s+of\s+\d+\s+shifts?", re.I)
+VISIBLE_SHIFT_HOURS_TEXT = re.compile(
+    r"\bHours:\s*(\d+(?:\.\d+)?)\s*hours?\s*/\s*week\b",
+    re.I,
+)
 
 
 def page_has_security_challenge(page: Page) -> bool:
@@ -277,15 +281,36 @@ def _open_filter_panel(page: Page):
 
 
 def _reset_filter_to_any_days(panel) -> None:
-    """Reset Amazon Filter first so the day choice returns to ANY/default."""
+    """Reset Amazon Filter so Amazon's default/all-view preferences are restored."""
     reset = _visible_first(
         panel.get_by_role("button", name=re.compile(r"^\s*Reset\s*$", re.I))
     )
     if reset is None:
         reset = _visible_first(panel.get_by_text("Reset", exact=True))
     if reset is None:
-        raise RuntimeError("Could not find Filter Reset button to restore ANY days.")
+        raise RuntimeError("Could not find Filter Reset button.")
     reset.click(timeout=5000)
+
+
+def reset_amazon_filters_for_all_shifts(page: Page) -> None:
+    """Reset Amazon's Filter once without selecting a desired-hours value.
+
+    This leaves Amazon's own default result set visible. The catcher does not
+    impose an hours filter; selected hours are handled only as local priority.
+    """
+    if "/available-schedule/" not in page.url:
+        raise RuntimeError("Not on Amazon's available-schedule page.")
+
+    panel, _ = _open_filter_panel(page)
+    _reset_filter_to_any_days(panel)
+    page.wait_for_timeout(150)
+    _click_panel_apply(panel, "Filter")
+    page.wait_for_timeout(350)
+    wait_for_schedule_settled(page)
+    _close_side_panel(page, panel, "Filter")
+    log.info(
+        "Amazon Filter reset to its default/all-view state; no desired-hours filter was selected by the catcher."
+    )
 
 
 def _set_desired_hours_by_visible_text(page: Page, panel, max_hours: float) -> str:
@@ -368,7 +393,7 @@ def apply_amazon_filter(
     max_hours: float,
     time_preference: str = "DAY",
 ) -> dict:
-    """Reapply Amazon Filter after every refresh."""
+    """Apply Amazon's hours Filter. Retained for compatibility/manual use."""
     if "/available-schedule/" not in page.url:
         raise RuntimeError("Not on Amazon's available-schedule page.")
 
@@ -401,7 +426,6 @@ def apply_amazon_filter(
 
 
 def _find_sorter_trigger(page: Page):
-    """Find Sort/Sorter using text, accessible name, aria-label, or title."""
     patterns = [
         page.get_by_text(re.compile(r"^\s*Sort(?:er)?\s*$", re.I)),
         page.get_by_role(
@@ -425,7 +449,6 @@ def apply_amazon_sorter(
     page: Page,
     sorter_name: str = "Hours – most to least",
 ) -> str:
-    """Optional sorter helper retained for manual/future use."""
     trigger = _find_sorter_trigger(page)
     if trigger is None:
         return "NOT APPLIED - control not found"
@@ -490,12 +513,7 @@ def apply_amazon_preferences(
     time_preference: str = "DAY",
     sorter_name: str = "Hours – most to least",
 ) -> dict:
-    """Apply only the essential Filter after each refresh.
-
-    The sorter is intentionally skipped during monitoring to reduce UI actions
-    and shorten the time between checks. The desired-hours Filter is the gate
-    used for detection.
-    """
+    """Legacy hours-filter helper retained for compatibility."""
     filter_status = apply_amazon_filter(
         page,
         max_hours,
@@ -503,6 +521,125 @@ def apply_amazon_preferences(
     )
     filter_status["sorter"] = "SKIPPED - faster monitoring"
     return filter_status
+
+
+def _card_ancestor_from_hours_anchor(anchor):
+    """Return a small card-like ancestor without moving or replacing Amazon DOM."""
+    for depth in range(1, 9):
+        try:
+            ancestor = anchor.locator("xpath=" + "/.." * depth)
+            text = " ".join(ancestor.inner_text(timeout=1200).split())
+        except Exception:
+            continue
+
+        if not text or len(text) > 3000:
+            continue
+        hours_found = VISIBLE_SHIFT_HOURS_TEXT.findall(text)
+        if len(hours_found) != 1:
+            continue
+        if re.search(
+            r"(Start date|Shift:|Schedule|AM\b|PM\b|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)",
+            text,
+            re.I,
+        ):
+            return ancestor, text
+
+    try:
+        return anchor.locator("xpath=.."), " ".join(
+            anchor.locator("xpath=..").inner_text(timeout=1200).split()
+        )
+    except Exception:
+        return anchor, ""
+
+
+def read_visible_shift_cards(page: Page) -> list[dict]:
+    """Read every visible Amazon shift card that exposes an Hours:/week value.
+
+    This does not click, sort, move, or replace any Amazon element.
+    """
+    if "/available-schedule/" not in page.url:
+        return []
+
+    try:
+        body_text = page.locator("body").inner_text(timeout=3000)
+    except Exception:
+        return []
+    if not SHIFT_COUNT_TEXT.search(body_text):
+        return []
+
+    anchors = page.get_by_text(VISIBLE_SHIFT_HOURS_TEXT)
+    cards = []
+    seen_signatures = set()
+
+    try:
+        count = anchors.count()
+    except Exception:
+        return []
+
+    for i in range(count):
+        anchor = anchors.nth(i)
+        try:
+            if not anchor.is_visible():
+                continue
+            anchor_text = " ".join(anchor.inner_text(timeout=1000).split())
+        except Exception:
+            continue
+
+        match = VISIBLE_SHIFT_HOURS_TEXT.search(anchor_text)
+        if match is None:
+            try:
+                match = VISIBLE_SHIFT_HOURS_TEXT.search(
+                    " ".join(anchor.locator("xpath=..").inner_text(timeout=1000).split())
+                )
+            except Exception:
+                match = None
+        if match is None:
+            continue
+
+        hours = float(match.group(1))
+        element, text = _card_ancestor_from_hours_anchor(anchor)
+        signature = (hours, text)
+        if signature in seen_signatures:
+            continue
+        seen_signatures.add(signature)
+
+        cards.append(
+            {
+                "index": len(cards),
+                "hours": hours,
+                "element": element,
+                "text": text or anchor_text,
+            }
+        )
+
+    return cards
+
+
+def highlight_priority_shift_card(page: Page, cards: list[dict], priority_hours: float):
+    """Highlight and scroll to the first exact-priority card without reordering DOM."""
+    exact = [card for card in cards if card.get("hours") == priority_hours]
+    if not exact:
+        return None
+
+    chosen = exact[0]
+    element = chosen.get("element")
+    if element is None:
+        return chosen
+
+    try:
+        element.evaluate(
+            """el => {
+                el.setAttribute('data-shift-catcher-priority', 'true');
+                el.style.outline = '4px solid #00a8e1';
+                el.style.outlineOffset = '3px';
+                el.scrollIntoView({behavior: 'instant', block: 'center', inline: 'nearest'});
+            }"""
+        )
+        page.wait_for_timeout(100)
+    except Exception as exc:
+        log.warning("Could not visually highlight priority shift card: %s", exc)
+
+    return chosen
 
 
 def get_apply_buttons(page: Page):
