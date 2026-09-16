@@ -40,8 +40,6 @@ class SessionMetrics:
     _check_interval_samples: int = field(default=0, repr=False)
     check_interval_max_seconds: float = 0.0
 
-    # Normal monitoring timing is tracked separately so deliberate 403 pauses do
-    # not inflate the real shift-check interval.
     _normal_last_check_monotonic: Optional[float] = field(default=None, repr=False)
     _normal_check_interval_total: float = field(default=0.0, repr=False)
     _normal_check_interval_samples: int = field(default=0, repr=False)
@@ -85,9 +83,6 @@ class SessionMetrics:
             entry["reason"] = reason
         self.state_history.append(entry)
 
-        # Break the normal-check timing chain when a 403 pause begins and again
-        # when normal monitoring resumes. This prevents the blocked period from
-        # being counted as a normal monitoring interval.
         if new_state == MonitorState.PAUSED_403:
             self._normal_last_check_monotonic = None
 
@@ -112,7 +107,6 @@ class SessionMetrics:
         now = time.monotonic()
         self.checks_total += 1
 
-        # Legacy/all-state interval metric. Kept for backward compatibility.
         if self._last_check_monotonic is not None:
             interval = now - self._last_check_monotonic
             self._check_interval_total += interval
@@ -123,8 +117,6 @@ class SessionMetrics:
             )
         self._last_check_monotonic = now
 
-        # Real normal monitoring interval: only samples while MONITORING and the
-        # baseline is reset across 403 recovery periods.
         if self.state == MonitorState.MONITORING.value:
             if self._normal_last_check_monotonic is not None:
                 normal_interval = now - self._normal_last_check_monotonic
@@ -158,12 +150,12 @@ class SessionMetrics:
     def record_screenshot(self, count: int = 1) -> None:
         self.screenshots_saved += max(0, count)
 
-    def record_notification(self, success: bool) -> None:
-        """Record a real delivery result, not just a notification attempt."""
+    def record_notification(self, success: Optional[bool] = None) -> None:
+        """Record a notification attempt and, when known, its delivery result."""
         self.notification_attempts += 1
-        if success:
+        if success is True:
             self.notifications_sent += 1
-        else:
+        elif success is False:
             self.notifications_failed += 1
 
     def record_error(self, error: Exception | str) -> None:
