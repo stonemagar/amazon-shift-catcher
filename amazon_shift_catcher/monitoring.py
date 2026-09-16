@@ -64,7 +64,9 @@ class SessionMetrics:
     visible_shifts_seen: int = 0
 
     screenshots_saved: int = 0
+    notification_attempts: int = 0
     notifications_sent: int = 0
+    notifications_failed: int = 0
     errors: int = 0
     last_error: Optional[str] = None
 
@@ -156,8 +158,13 @@ class SessionMetrics:
     def record_screenshot(self, count: int = 1) -> None:
         self.screenshots_saved += max(0, count)
 
-    def record_notification(self, count: int = 1) -> None:
-        self.notifications_sent += max(0, count)
+    def record_notification(self, success: bool) -> None:
+        """Record a real delivery result, not just a notification attempt."""
+        self.notification_attempts += 1
+        if success:
+            self.notifications_sent += 1
+        else:
+            self.notifications_failed += 1
 
     def record_error(self, error: Exception | str) -> None:
         self.errors += 1
@@ -211,9 +218,6 @@ class SessionMetrics:
             "403_average_duration_seconds": round(avg_403, 3),
             "403_max_duration_seconds": round(self.blocked_max_seconds, 3),
             "403_recovery_tests": self.recovery_tests,
-            # Requested professional recovery metrics:
-            # - 403_pause_time: cumulative seconds normal monitoring was paused.
-            # - 403_observed_duration: average observed 403 duration per event.
             "403_pause_time": round(self.blocked_total_seconds, 3),
             "403_observed_duration": round(avg_403, 3),
             "403_observed_durations": [
@@ -225,7 +229,9 @@ class SessionMetrics:
             "priority_shift_batches_seen": self.priority_shift_batches_seen,
             "visible_shifts_seen": self.visible_shifts_seen,
             "screenshots_saved": self.screenshots_saved,
+            "notification_attempts": self.notification_attempts,
             "notifications_sent": self.notifications_sent,
+            "notifications_failed": self.notifications_failed,
             "errors": self.errors,
             "last_error": self.last_error,
         }
