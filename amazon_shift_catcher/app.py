@@ -115,6 +115,12 @@ def timestamp_name(prefix: str) -> Path:
     return SCREENSHOT_DIR / f"{prefix}-{stamp}.png"
 
 
+def shift_live_screenshot_name(index: int) -> Path:
+    """Unique filename for the one-second shift screenshot recorder."""
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+    return SCREENSHOT_DIR / f"shift-live-{index:04d}-{stamp}.png"
+
+
 def choose_amazon_page(browser, my_jobs_url: str):
     pages = []
     for context in browser.contexts:
@@ -215,6 +221,57 @@ def find_available_shift_hours(page, max_hours: float) -> list[float]:
         if hours <= max_hours:
             matches.append(hours)
     return sorted(set(matches), reverse=True)
+
+
+def capture_shift_page_every_second(page, log) -> None:
+    """Capture the live shift page once per second after a shift is detected.
+
+    Refreshing remains stopped. Screenshots continue while the same shift page
+    still shows a shift count. They stop when the user navigates away, the shift
+    disappears, the tab closes, or the program is interrupted.
+    """
+    try:
+        original_url = page.url
+    except Exception:
+        original_url = ""
+
+    log.warning(
+        "Live shift screenshot recorder STARTED: saving one full-page screenshot every 1 second."
+    )
+    count = 0
+    alarm_stopped = False
+
+    while not page.is_closed():
+        count += 1
+        try:
+            save_screenshot(page, shift_live_screenshot_name(count))
+        except Exception as exc:
+            log.warning("Could not save live shift screenshot #%s: %s", count, exc)
+            break
+
+        # Keep the audible alarm brief, while screenshot recording continues.
+        if count >= 5 and not alarm_stopped:
+            stop_alarm()
+            alarm_stopped = True
+
+        page.wait_for_timeout(1000)
+
+        try:
+            if page.url != original_url:
+                log.info("Live shift screenshot recorder stopped because the page changed.")
+                break
+            body_text = page.locator("body").inner_text(timeout=1500)
+            if not SHIFT_COUNT_RE.search(body_text):
+                log.info(
+                    "Live shift screenshot recorder stopped because the shift card/count is no longer visible."
+                )
+                break
+        except Exception:
+            log.info("Live shift screenshot recorder stopped because the page is no longer readable.")
+            break
+
+    stop_alarm()
+    log.info("Live shift screenshot recorder saved %s screenshot(s).", count)
 
 
 def log_preferences(log, prefs: dict) -> None:
@@ -335,14 +392,13 @@ def run():
                         "Amazon shift available after the desired-hours filter.\n"
                         f"Visible weekly hours: {hours_text}\n"
                         f"Desired maximum: {desired_max_hours:g} hours/week\n\n"
-                        "Refreshing has STOPPED so the current shift page stays intact.",
+                        "Refreshing has STOPPED. Live screenshots will now be saved every 1 second while the shift page remains visible.",
                         title="AMAZON SHIFT - REFRESH STOPPED",
                         priority=5,
                     )
-                    page.wait_for_timeout(5000)
-                    stop_alarm()
+                    capture_shift_page_every_second(page, log)
                     log.warning(
-                        "Monitor paused/stopped with the live filtered shift page left open in Brave."
+                        "Monitor stopped with the live filtered shift page left open in Brave."
                     )
                     break
 
