@@ -25,6 +25,7 @@ from .rules import parse_shift, matches_rules, score_shift
 ROOT = Path(__file__).resolve().parent.parent
 LOG_DIR = ROOT / "logs"
 SCREENSHOT_DIR = ROOT / "screenshots"
+BLOCKED_RETRY_SECONDS = 60
 
 EMPTY_SCHEDULE_RE = re.compile(
     r"(Sorry,\s*we do not have any schedules matching your preferences(?:\.\s*"
@@ -179,11 +180,20 @@ def get_blocked_page_status(page) -> tuple[bool, str]:
     return blocked, excerpt
 
 
-def notify_blocked_and_stop(page, log, excerpt: str) -> None:
+def recover_from_403(page, log, excerpt: str) -> bool:
+    """Pause all normal monitoring and test recovery once every 60 seconds."""
+    started_at = datetime.now()
+    started_monotonic = time.monotonic()
+    attempt = 0
+
     log.error(
-        "Amazon returned a 403/CloudFront blocked page. Monitoring is stopping "
-        "instead of repeatedly refreshing the blocked page."
+        "Amazon returned a 403/CloudFront blocked page at %s. "
+        "Normal monitoring is paused.",
+        started_at.strftime("%Y-%m-%d %H:%M:%S"),
     )
+    if excerpt:
+        log.error("Blocked-page excerpt: %s", excerpt)
+
     try:
         if not page.is_closed():
             save_screenshot(page, timestamp_name("amazon-403-blocked"))
@@ -192,13 +202,75 @@ def notify_blocked_and_stop(page, log, excerpt: str) -> None:
 
     send_notification(
         "Amazon returned a 403 / Request blocked page.\n"
-        "Automatic monitoring has STOPPED to avoid repeated requests.\n\n"
-        "Open Amazon Jobs manually later and confirm the site is accessible before restarting the monitor.",
-        title="Amazon monitor stopped - 403 blocked",
+        "Normal monitoring is PAUSED.\n"
+        f"The catcher will wait {BLOCKED_RETRY_SECONDS} seconds, then make one recovery test.\n"
+        "If the page is still blocked it will wait another 60 seconds before testing again.",
+        title="Amazon 403 - recovery mode",
         priority=5,
     )
-    if excerpt:
-        log.error("Blocked-page excerpt: %s", excerpt)
+
+    while True:
+        attempt += 1
+        log.warning(
+            "403 recovery attempt %s: no requests for %s seconds, then one test reload.",
+            attempt,
+            BLOCKED_RETRY_SECONDS,
+        )
+        time.sleep(BLOCKED_RETRY_SECONDS)
+
+        if page.is_closed():
+            log.error("Amazon tab was closed during 403 recovery.")
+            return False
+
+        try:
+            page.reload(wait_until="domcontentloaded", timeout=30000)
+        except Exception as exc:
+            log.exception("403 recovery test reload failed: %s", exc)
+            send_notification(
+                f"Amazon 403 recovery test failed with a page error:\n{exc}\n\n"
+                "Automatic monitoring has stopped. Check the page manually.",
+                title="Amazon 403 recovery stopped",
+                priority=5,
+            )
+            return False
+
+        blocked, latest_excerpt = get_blocked_page_status(page)
+        if blocked:
+            log.warning(
+                "403 is still present after recovery attempt %s. Waiting another %s seconds.",
+                attempt,
+                BLOCKED_RETRY_SECONDS,
+            )
+            if latest_excerpt:
+                log.debug("Blocked-page excerpt: %s", latest_excerpt)
+            continue
+
+        try:
+            wait_for_schedule_settled(page)
+        except Exception as exc:
+            log.warning("Page returned from 403 but did not settle normally yet: %s", exc)
+
+        blocked, latest_excerpt = get_blocked_page_status(page)
+        if blocked:
+            log.warning(
+                "403 returned while verifying recovery. Waiting another %s seconds.",
+                BLOCKED_RETRY_SECONDS,
+            )
+            continue
+
+        elapsed = int(time.monotonic() - started_monotonic)
+        log.warning(
+            "403 RECOVERED after %s seconds and %s recovery test(s).",
+            elapsed,
+            attempt,
+        )
+        send_notification(
+            f"Amazon page recovered from the 403 after about {elapsed} seconds.\n"
+            "The hours filter will be restored and normal monitoring will resume.",
+            title="Amazon 403 recovered",
+            priority=4,
+        )
+        return True
 
 
 def find_available_shift_hours(page, max_hours: float) -> list[float]:
@@ -249,7 +321,6 @@ def capture_shift_page_every_second(page, log) -> None:
             log.warning("Could not save live shift screenshot #%s: %s", count, exc)
             break
 
-        # Keep the audible alarm brief, while screenshot recording continues.
         if count >= 5 and not alarm_stopped:
             stop_alarm()
             alarm_stopped = True
@@ -310,6 +381,7 @@ def run():
     log.info("Starting Amazon Shift Catcher")
     log.info("AUTO_APPLY=%s", auto_apply)
     log.info("Check interval=%ss", interval)
+    log.info("403 recovery interval=%ss", BLOCKED_RETRY_SECONDS)
     log.info("Desired maximum hours/week=%s", desired_max_hours)
     log.info("Fast mode: after each refresh only the essential Amazon hours filter is reapplied.")
     log.info("Connecting to existing Brave session at %s", cdp_url)
@@ -332,8 +404,8 @@ def run():
 
             blocked, excerpt = get_blocked_page_status(page)
             if blocked:
-                notify_blocked_and_stop(page, log, excerpt)
-                return
+                if not recover_from_403(page, log, excerpt):
+                    return
 
             prefs = apply_amazon_preferences(
                 page,
@@ -349,6 +421,7 @@ def run():
                 f"Days: {prefs['days']}\n"
                 f"Sorter: {prefs['sorter']}\n"
                 f"Monitoring every {interval} seconds.\n"
+                f"403 recovery test: every {BLOCKED_RETRY_SECONDS} seconds while blocked.\n"
                 f"Auto Apply: {'ON' if auto_apply else 'OFF'}",
                 title="Amazon monitor started",
                 priority=3,
@@ -362,8 +435,18 @@ def run():
 
                 blocked, excerpt = get_blocked_page_status(page)
                 if blocked:
-                    notify_blocked_and_stop(page, log, excerpt)
-                    break
+                    if not recover_from_403(page, log, excerpt):
+                        break
+                    prefs = apply_amazon_preferences(
+                        page,
+                        max_hours=desired_max_hours,
+                        time_preference="DAY",
+                        sorter_name="Hours – most to least",
+                    )
+                    log_preferences(log, prefs)
+                    alerted_for_current_batch = False
+                    log.info("Normal %s-second monitoring resumed after 403 recovery.", interval)
+                    continue
 
                 if page_has_security_challenge(page):
                     start_alarm()
@@ -492,15 +575,23 @@ def run():
                 time.sleep(interval)
 
                 try:
-                    # Fast cycle: REFRESH -> SETTLE -> HOURS FILTER -> CHECK.
-                    # The sorter is intentionally skipped to reduce UI actions.
                     page.reload(wait_until="domcontentloaded", timeout=30000)
                     wait_for_schedule_settled(page)
 
                     blocked, excerpt = get_blocked_page_status(page)
                     if blocked:
-                        notify_blocked_and_stop(page, log, excerpt)
-                        break
+                        if not recover_from_403(page, log, excerpt):
+                            break
+                        prefs = apply_amazon_preferences(
+                            page,
+                            max_hours=desired_max_hours,
+                            time_preference="DAY",
+                            sorter_name="Hours – most to least",
+                        )
+                        log_preferences(log, prefs)
+                        alerted_for_current_batch = False
+                        log.info("Normal %s-second monitoring resumed after 403 recovery.", interval)
+                        continue
 
                     prefs = apply_amazon_preferences(
                         page,
