@@ -117,7 +117,6 @@ def timestamp_name(prefix: str) -> Path:
 
 
 def shift_live_screenshot_name(index: int) -> Path:
-    """Unique filename for the one-second shift screenshot recorder."""
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
     return SCREENSHOT_DIR / f"shift-live-{index:04d}-{stamp}.png"
 
@@ -274,6 +273,7 @@ def recover_from_403(page, log, excerpt: str) -> bool:
 
 
 def find_available_shift_hours(page, max_hours: float) -> list[float]:
+    """Find visible shifts at or below the selected weekly-hours limit."""
     try:
         if "/available-schedule/" not in page.url:
             return []
@@ -296,12 +296,7 @@ def find_available_shift_hours(page, max_hours: float) -> list[float]:
 
 
 def capture_shift_page_every_second(page, log) -> None:
-    """Capture the live shift page once per second after a shift is detected.
-
-    Refreshing remains stopped. Screenshots continue while the same shift page
-    still shows a shift count. They stop when the user navigates away, the shift
-    disappears, the tab closes, or the program is interrupted.
-    """
+    """Capture the live shift page once per second after a shift is detected."""
     try:
         original_url = page.url
     except Exception:
@@ -360,6 +355,18 @@ def log_preferences(log, prefs: dict) -> None:
         )
 
 
+def apply_hours_filter(page, desired_max_hours: float, log) -> dict:
+    """Apply the Amazon UI filter at startup and after 403 recovery."""
+    prefs = apply_amazon_preferences(
+        page,
+        max_hours=desired_max_hours,
+        time_preference="DAY",
+        sorter_name="Hours – most to least",
+    )
+    log_preferences(log, prefs)
+    return prefs
+
+
 def run():
     load_dotenv(ROOT / ".env")
     config = load_config()
@@ -383,7 +390,10 @@ def run():
     log.info("Check interval=%ss", interval)
     log.info("403 recovery interval=%ss", BLOCKED_RETRY_SECONDS)
     log.info("Desired maximum hours/week=%s", desired_max_hours)
-    log.info("Fast mode: after each refresh only the essential Amazon hours filter is reapplied.")
+    log.info(
+        "Fast mode: Amazon hours filter is applied at startup and after 403 recovery only. "
+        "Normal cycles only reload and inspect visible shifts with the Python hours guard."
+    )
     log.info("Connecting to existing Brave session at %s", cdp_url)
 
     with sync_playwright() as p:
@@ -407,13 +417,7 @@ def run():
                 if not recover_from_403(page, log, excerpt):
                     return
 
-            prefs = apply_amazon_preferences(
-                page,
-                max_hours=desired_max_hours,
-                time_preference="DAY",
-                sorter_name="Hours – most to least",
-            )
-            log_preferences(log, prefs)
+            prefs = apply_hours_filter(page, desired_max_hours, log)
 
             send_notification(
                 "Amazon Shift Catcher connected to your existing Brave session.\n"
@@ -421,6 +425,7 @@ def run():
                 f"Days: {prefs['days']}\n"
                 f"Sorter: {prefs['sorter']}\n"
                 f"Monitoring every {interval} seconds.\n"
+                "Fast mode: filter drawer is NOT reopened on every normal refresh.\n"
                 f"403 recovery test: every {BLOCKED_RETRY_SECONDS} seconds while blocked.\n"
                 f"Auto Apply: {'ON' if auto_apply else 'OFF'}",
                 title="Amazon monitor started",
@@ -437,15 +442,12 @@ def run():
                 if blocked:
                     if not recover_from_403(page, log, excerpt):
                         break
-                    prefs = apply_amazon_preferences(
-                        page,
-                        max_hours=desired_max_hours,
-                        time_preference="DAY",
-                        sorter_name="Hours – most to least",
-                    )
-                    log_preferences(log, prefs)
+                    prefs = apply_hours_filter(page, desired_max_hours, log)
                     alerted_for_current_batch = False
-                    log.info("Normal %s-second monitoring resumed after 403 recovery.", interval)
+                    log.info(
+                        "Normal %s-second fast monitoring resumed after 403 recovery.",
+                        interval,
+                    )
                     continue
 
                 if page_has_security_challenge(page):
@@ -464,7 +466,7 @@ def run():
                 if available_hours:
                     hours_text = ", ".join(f"{h:g}" for h in available_hours)
                     log.warning(
-                        "AVAILABLE SHIFT DETECTED after Amazon filter at/below %s h/week "
+                        "AVAILABLE SHIFT DETECTED at/below %s h/week "
                         "(visible hours: %s). REFRESHING STOPPED immediately.",
                         f"{desired_max_hours:g}",
                         hours_text,
@@ -472,7 +474,7 @@ def run():
                     save_screenshot(page, timestamp_name("shift-freeze"))
                     start_alarm()
                     send_notification(
-                        "Amazon shift available after the desired-hours filter.\n"
+                        "Amazon shift available within your desired-hours limit.\n"
                         f"Visible weekly hours: {hours_text}\n"
                         f"Desired maximum: {desired_max_hours:g} hours/week\n\n"
                         "Refreshing has STOPPED. Live screenshots will now be saved every 1 second while the shift page remains visible.",
@@ -481,24 +483,13 @@ def run():
                     )
                     capture_shift_page_every_second(page, log)
                     log.warning(
-                        "Monitor stopped with the live filtered shift page left open in Brave."
+                        "Monitor stopped with the live shift page left open in Brave."
                     )
                     break
 
                 cards = read_shift_cards(page)
                 if cards:
                     log.info("%d visible shift action(s) detected", len(cards))
-
-                    if not alerted_for_current_batch:
-                        start_alarm()
-                        save_screenshot(page, timestamp_name("shift-found"))
-                        send_notification(
-                            f"{len(cards)} available shift option(s) detected.\n"
-                            "Checking your rules now.",
-                            title="AMAZON SHIFT FOUND",
-                            priority=5,
-                        )
-                        alerted_for_current_batch = True
 
                     matches = []
                     for card in cards:
@@ -526,6 +517,17 @@ def run():
                             f"Time: {best_shift.start_time or '?'} - {best_shift.end_time or '?'}"
                         )
 
+                        if not alerted_for_current_batch:
+                            start_alarm()
+                            save_screenshot(page, timestamp_name("shift-found"))
+                            send_notification(
+                                f"{len(matches)} matching shift option(s) detected.\n"
+                                "Refreshing is being stopped so you can act on the live page.",
+                                title="AMAZON MATCHING SHIFT FOUND",
+                                priority=5,
+                            )
+                            alerted_for_current_batch = True
+
                         if auto_apply:
                             log.warning("Matching shift found. Clicking Apply.")
                             save_screenshot(page, timestamp_name("before-apply"))
@@ -541,15 +543,25 @@ def run():
                             )
                             log.info("Apply clicked. Version 1 complete.")
                             break
-                        else:
-                            send_notification(
-                                details + "\n\nAUTO_APPLY is OFF, so Apply was not clicked.",
-                                title="MATCHING AMAZON SHIFT FOUND",
-                                priority=5,
-                            )
-                            log.warning("Matching shift found but AUTO_APPLY is OFF.")
-                    else:
-                        log.info("Shift cards exist, but none match the configured rules.")
+
+                        send_notification(
+                            details
+                            + "\n\nAUTO_APPLY is OFF. The live page has been left open and refreshing is stopped.",
+                            title="MATCHING AMAZON SHIFT FOUND",
+                            priority=5,
+                        )
+                        log.warning(
+                            "Matching shift found with AUTO_APPLY OFF. Refreshing stopped."
+                        )
+                        capture_shift_page_every_second(page, log)
+                        break
+
+                    if alerted_for_current_batch:
+                        stop_alarm()
+                    alerted_for_current_batch = False
+                    log.info(
+                        "Shift cards are visible, but none match the configured rules."
+                    )
                 else:
                     if alerted_for_current_batch:
                         stop_alarm()
@@ -575,37 +587,49 @@ def run():
                 time.sleep(interval)
 
                 try:
+                    reload_started = time.monotonic()
+
+                    # FAST CYCLE: reload -> immediate 403 check -> settle -> inspect.
+                    # Do not reopen/reset/apply the Filter drawer on normal cycles.
                     page.reload(wait_until="domcontentloaded", timeout=30000)
+
+                    blocked, excerpt = get_blocked_page_status(page)
+                    if blocked:
+                        if not recover_from_403(page, log, excerpt):
+                            break
+                        prefs = apply_hours_filter(page, desired_max_hours, log)
+                        alerted_for_current_batch = False
+                        log.info(
+                            "Normal %s-second fast monitoring resumed after 403 recovery.",
+                            interval,
+                        )
+                        continue
+
                     wait_for_schedule_settled(page)
 
                     blocked, excerpt = get_blocked_page_status(page)
                     if blocked:
                         if not recover_from_403(page, log, excerpt):
                             break
-                        prefs = apply_amazon_preferences(
-                            page,
-                            max_hours=desired_max_hours,
-                            time_preference="DAY",
-                            sorter_name="Hours – most to least",
-                        )
-                        log_preferences(log, prefs)
+                        prefs = apply_hours_filter(page, desired_max_hours, log)
                         alerted_for_current_batch = False
-                        log.info("Normal %s-second monitoring resumed after 403 recovery.", interval)
+                        log.info(
+                            "Normal %s-second fast monitoring resumed after 403 recovery.",
+                            interval,
+                        )
                         continue
 
-                    prefs = apply_amazon_preferences(
-                        page,
-                        max_hours=desired_max_hours,
-                        time_preference="DAY",
-                        sorter_name="Hours – most to least",
+                    reload_elapsed = time.monotonic() - reload_started
+                    log.info(
+                        "Fast reload ready in %.2fs; Filter drawer was not reopened.",
+                        reload_elapsed,
                     )
-                    log_preferences(log, prefs)
                 except Exception as exc:
                     log.exception(
-                        "Refresh/filter cycle failed. Monitoring is stopping rather than checking an unverified page."
+                        "Fast refresh cycle failed. Monitoring is stopping rather than checking an unverified page."
                     )
                     send_notification(
-                        "Amazon monitoring stopped because the refresh/filter cycle failed.\n"
+                        "Amazon monitoring stopped because the fast refresh cycle failed.\n"
                         f"Error: {exc}\n\n"
                         "Check the Amazon page manually before restarting.",
                         title="Amazon monitor stopped - page error",
