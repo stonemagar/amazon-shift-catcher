@@ -19,6 +19,7 @@ from .browser import (
     save_screenshot,
     wait_for_schedule_settled,
 )
+from .monitoring import MonitorState, SessionMetrics, rank_hours
 from .notifier import send_notification
 
 
@@ -115,6 +116,16 @@ def shift_live_screenshot_name(index: int) -> Path:
     return SCREENSHOT_DIR / f"shift-live-{index:04d}-{stamp}.png"
 
 
+def tracked_screenshot(page, path: Path, metrics: SessionMetrics) -> None:
+    save_screenshot(page, path)
+    metrics.record_screenshot()
+
+
+def tracked_notification(metrics: SessionMetrics, body: str, **kwargs) -> None:
+    send_notification(body, **kwargs)
+    metrics.record_notification()
+
+
 def choose_amazon_page(browser, my_jobs_url: str):
     pages = []
     for context in browser.contexts:
@@ -173,15 +184,15 @@ def get_blocked_page_status(page) -> tuple[bool, str]:
     return blocked, excerpt
 
 
-def recover_from_403(page, log, excerpt: str) -> bool:
-    """Pause all normal monitoring and test recovery once every 60 seconds."""
+def recover_from_403(page, log, excerpt: str, metrics: SessionMetrics) -> bool:
+    """Pause normal monitoring and make one recovery test every 60 seconds."""
     started_at = datetime.now()
     started_monotonic = time.monotonic()
     attempt = 0
 
+    metrics.transition(MonitorState.PAUSED_403, log, "CloudFront 403 detected")
     log.error(
-        "Amazon returned a 403/CloudFront blocked page at %s. "
-        "Normal monitoring is paused.",
+        "Amazon returned a 403/CloudFront blocked page at %s. Normal monitoring is paused.",
         started_at.strftime("%Y-%m-%d %H:%M:%S"),
     )
     if excerpt:
@@ -189,11 +200,16 @@ def recover_from_403(page, log, excerpt: str) -> bool:
 
     try:
         if not page.is_closed():
-            save_screenshot(page, timestamp_name("amazon-403-blocked"))
+            tracked_screenshot(
+                page,
+                timestamp_name("amazon-403-blocked"),
+                metrics,
+            )
     except Exception:
         pass
 
-    send_notification(
+    tracked_notification(
+        metrics,
         "Amazon returned a 403 / Request blocked page.\n"
         "Normal monitoring is PAUSED.\n"
         f"The catcher will wait {BLOCKED_RETRY_SECONDS} seconds, then make one recovery test.\n"
@@ -212,14 +228,21 @@ def recover_from_403(page, log, excerpt: str) -> bool:
         time.sleep(BLOCKED_RETRY_SECONDS)
 
         if page.is_closed():
-            log.error("Amazon tab was closed during 403 recovery.")
+            metrics.record_error("Amazon tab closed during 403 recovery")
             return False
 
+        metrics.transition(
+            MonitorState.RECOVERING,
+            log,
+            f"403 recovery test {attempt}",
+        )
         try:
             page.reload(wait_until="domcontentloaded", timeout=30000)
         except Exception as exc:
+            metrics.record_error(exc)
             log.exception("403 recovery test reload failed: %s", exc)
-            send_notification(
+            tracked_notification(
+                metrics,
                 f"Amazon 403 recovery test failed with a page error:\n{exc}\n\n"
                 "Automatic monitoring has stopped. Check the page manually.",
                 title="Amazon 403 recovery stopped",
@@ -229,6 +252,11 @@ def recover_from_403(page, log, excerpt: str) -> bool:
 
         blocked, latest_excerpt = get_blocked_page_status(page)
         if blocked:
+            metrics.transition(
+                MonitorState.PAUSED_403,
+                log,
+                f"403 still active after recovery test {attempt}",
+            )
             log.warning(
                 "403 is still present after recovery attempt %s. Waiting another %s seconds.",
                 attempt,
@@ -245,20 +273,28 @@ def recover_from_403(page, log, excerpt: str) -> bool:
 
         blocked, _ = get_blocked_page_status(page)
         if blocked:
-            log.warning(
-                "403 returned while verifying recovery. Waiting another %s seconds.",
-                BLOCKED_RETRY_SECONDS,
+            metrics.transition(
+                MonitorState.PAUSED_403,
+                log,
+                "403 returned during recovery verification",
             )
             continue
 
-        elapsed = int(time.monotonic() - started_monotonic)
+        elapsed = time.monotonic() - started_monotonic
+        metrics.record_403(elapsed, attempt)
+        metrics.transition(
+            MonitorState.MONITORING,
+            log,
+            f"403 recovered after {int(elapsed)} seconds",
+        )
         log.warning(
             "403 RECOVERED after %s seconds and %s recovery test(s).",
-            elapsed,
+            int(elapsed),
             attempt,
         )
-        send_notification(
-            f"Amazon page recovered from the 403 after about {elapsed} seconds.\n"
+        tracked_notification(
+            metrics,
+            f"Amazon page recovered from the 403 after about {int(elapsed)} seconds.\n"
             "Normal all-shift monitoring will resume.",
             title="Amazon 403 recovered",
             priority=4,
@@ -287,12 +323,7 @@ def find_all_available_shift_hours(page) -> list[float]:
     return result
 
 
-def priority_order(hours: list[float], preferred: float) -> list[float]:
-    """Rank exact preferred hours first while preserving all other original order."""
-    return sorted(hours, key=lambda value: 0 if value == preferred else 1)
-
-
-def capture_shift_page_every_second(page, log) -> None:
+def capture_shift_page_every_second(page, log, metrics: SessionMetrics) -> None:
     """Capture the live shift page once per second after a shift is detected."""
     try:
         original_url = page.url
@@ -308,7 +339,11 @@ def capture_shift_page_every_second(page, log) -> None:
     while not page.is_closed():
         count += 1
         try:
-            save_screenshot(page, shift_live_screenshot_name(count))
+            tracked_screenshot(
+                page,
+                shift_live_screenshot_name(count),
+                metrics,
+            )
         except Exception as exc:
             log.warning("Could not save live shift screenshot #%s: %s", count, exc)
             break
@@ -337,7 +372,12 @@ def capture_shift_page_every_second(page, log) -> None:
     log.info("Live shift screenshot recorder saved %s screenshot(s).", count)
 
 
-def handle_available_shifts(page, log, priority_hours: float) -> bool:
+def handle_available_shifts(
+    page,
+    log,
+    priority_hours: float,
+    metrics: SessionMetrics,
+) -> bool:
     """Detect all visible shifts, rank locally, highlight priority, and freeze page."""
     cards = read_visible_shift_cards(page)
     visible_hours = [card["hours"] for card in cards]
@@ -347,8 +387,14 @@ def handle_available_shifts(page, log, priority_hours: float) -> bool:
     if not visible_hours:
         return False
 
-    ranked_hours = priority_order(visible_hours, priority_hours)
+    ranked_hours = rank_hours(visible_hours, priority_hours)
     exact_count = sum(1 for value in visible_hours if value == priority_hours)
+    metrics.record_shift_batch(len(visible_hours), exact_count)
+    metrics.transition(
+        MonitorState.SHIFT_FOUND,
+        log,
+        f"{len(visible_hours)} visible shift(s); {exact_count} exact-priority",
+    )
 
     log.warning(
         "AVAILABLE SHIFT(S) DETECTED. Visible hours=%s | Local priority order=%s | "
@@ -358,7 +404,6 @@ def handle_available_shifts(page, log, priority_hours: float) -> bool:
         f"{priority_hours:g}",
     )
 
-    highlighted = None
     if cards:
         highlighted = highlight_priority_shift_card(page, cards, priority_hours)
         if highlighted is None:
@@ -367,7 +412,7 @@ def handle_available_shifts(page, log, priority_hours: float) -> bool:
             except Exception:
                 pass
 
-    save_screenshot(page, timestamp_name("shift-freeze"))
+    tracked_screenshot(page, timestamp_name("shift-freeze"), metrics)
     start_alarm()
 
     if exact_count:
@@ -387,9 +432,9 @@ def handle_available_shifts(page, log, priority_hours: float) -> bool:
         )
         title = "AMAZON SHIFT FOUND - OTHER HOURS"
 
-    send_notification(message, title=title, priority=5)
+    tracked_notification(metrics, message, title=title, priority=5)
     log.warning("Refreshing stopped so the live Amazon cards remain clickable.")
-    capture_shift_page_every_second(page, log)
+    capture_shift_page_every_second(page, log, metrics)
     return True
 
 
@@ -401,11 +446,14 @@ def run():
 
     setup_logging()
     log = logging.getLogger("shift-catcher")
+    metrics = SessionMetrics()
+    stop_reason = "normal shutdown"
 
     interval = max(3, int(config.get("check_interval_seconds", 10)))
     cdp_url = os.getenv("BRAVE_CDP_URL", "http://127.0.0.1:9222").strip()
 
     log.info("Starting Amazon Shift Catcher")
+    log.info("Session ID=%s", metrics.session_id)
     log.info("Check interval=%ss", interval)
     log.info("403 recovery interval=%ss", BLOCKED_RETRY_SECONDS)
     log.info("Priority weekly hours=%s", selected_priority_hours)
@@ -419,6 +467,10 @@ def run():
         try:
             browser = p.chromium.connect_over_cdp(cdp_url)
         except Exception as exc:
+            metrics.record_error(exc)
+            metrics.transition(MonitorState.ERROR, log, "Could not connect to Brave")
+            metrics.finish("browser connection failed")
+            metrics.save(LOG_DIR)
             raise RuntimeError(
                 "Could not connect to Brave. Start Brave with remote debugging on port 9222, "
                 "log in to Amazon Jobs, leave Brave open, then run this program."
@@ -430,18 +482,19 @@ def run():
         try:
             reach_shift_page(page, config["my_jobs_url"], config.get("job_id") or None)
             wait_for_schedule_settled(page)
+            metrics.transition(MonitorState.MONITORING, log, "Shift page ready")
 
             blocked, excerpt = get_blocked_page_status(page)
             if blocked:
-                if not recover_from_403(page, log, excerpt):
+                if not recover_from_403(page, log, excerpt, metrics):
+                    stop_reason = "403 recovery stopped"
                     return
 
-            # If a live shift is already present, preserve it immediately rather than
-            # opening a filter drawer first.
-            if handle_available_shifts(page, log, selected_priority_hours):
+            metrics.mark_check()
+            if handle_available_shifts(page, log, selected_priority_hours, metrics):
+                stop_reason = "shift found"
                 return
 
-            # Clear any hours/day filter left from an earlier run. This is done once.
             try:
                 reset_amazon_filters_for_all_shifts(page)
             except Exception as exc:
@@ -451,7 +504,8 @@ def run():
                     exc,
                 )
 
-            send_notification(
+            tracked_notification(
+                metrics,
                 "Amazon Shift Catcher connected to your existing Brave session.\n"
                 f"Priority hours: {selected_priority_hours:g} hours/week\n"
                 "Amazon desired-hours filter: not used by the catcher\n"
@@ -466,29 +520,38 @@ def run():
                 if page.is_closed():
                     raise RuntimeError("The Amazon Jobs tab was closed.")
 
+                metrics.mark_check()
                 blocked, excerpt = get_blocked_page_status(page)
                 if blocked:
-                    if not recover_from_403(page, log, excerpt):
+                    if not recover_from_403(page, log, excerpt, metrics):
+                        stop_reason = "403 recovery stopped"
                         break
-                    log.info(
-                        "Normal %s-second all-shift monitoring resumed after 403 recovery.",
-                        interval,
-                    )
                     continue
 
                 if page_has_security_challenge(page):
+                    metrics.transition(
+                        MonitorState.SECURITY_CHECK,
+                        log,
+                        "Amazon security/verification page detected",
+                    )
                     start_alarm()
-                    save_screenshot(page, timestamp_name("security-challenge"))
-                    send_notification(
+                    tracked_screenshot(
+                        page,
+                        timestamp_name("security-challenge"),
+                        metrics,
+                    )
+                    tracked_notification(
+                        metrics,
                         "Amazon security or verification page detected. "
                         "Automation has stopped. Complete it manually.",
                         title="Amazon action required",
                         priority=5,
                     )
-                    log.error("Security challenge detected. Stopping.")
+                    stop_reason = "security check"
                     break
 
-                if handle_available_shifts(page, log, selected_priority_hours):
+                if handle_available_shifts(page, log, selected_priority_hours, metrics):
+                    stop_reason = "shift found"
                     break
 
                 url, title, empty_state, excerpt = get_page_status(page)
@@ -516,59 +579,89 @@ def run():
 
                     blocked, excerpt = get_blocked_page_status(page)
                     if blocked:
-                        if not recover_from_403(page, log, excerpt):
+                        metrics.record_reload(time.monotonic() - reload_started)
+                        if not recover_from_403(page, log, excerpt, metrics):
+                            stop_reason = "403 recovery stopped"
                             break
-                        log.info(
-                            "Normal %s-second all-shift monitoring resumed after 403 recovery.",
-                            interval,
-                        )
                         continue
 
                     wait_for_schedule_settled(page)
 
                     blocked, excerpt = get_blocked_page_status(page)
+                    reload_elapsed = time.monotonic() - reload_started
+                    metrics.record_reload(reload_elapsed)
+
                     if blocked:
-                        if not recover_from_403(page, log, excerpt):
+                        if not recover_from_403(page, log, excerpt, metrics):
+                            stop_reason = "403 recovery stopped"
                             break
-                        log.info(
-                            "Normal %s-second all-shift monitoring resumed after 403 recovery.",
-                            interval,
-                        )
                         continue
 
-                    reload_elapsed = time.monotonic() - reload_started
                     log.info(
                         "Fast reload ready in %.2fs; no hours filter was applied.",
                         reload_elapsed,
                     )
                 except Exception as exc:
+                    metrics.record_error(exc)
+                    metrics.transition(
+                        MonitorState.ERROR,
+                        log,
+                        "Fast refresh cycle failed",
+                    )
                     log.exception(
                         "Fast refresh cycle failed. Monitoring is stopping rather than checking an unverified page."
                     )
-                    send_notification(
+                    tracked_notification(
+                        metrics,
                         "Amazon monitoring stopped because the fast refresh cycle failed.\n"
                         f"Error: {exc}\n\n"
                         "Check the Amazon page manually before restarting.",
                         title="Amazon monitor stopped - page error",
                         priority=5,
                     )
+                    stop_reason = "refresh error"
                     break
 
         except KeyboardInterrupt:
+            stop_reason = "stopped by user"
             log.info("Stopped by user.")
         except Exception as exc:
+            stop_reason = "fatal error"
+            metrics.record_error(exc)
+            metrics.transition(MonitorState.ERROR, log, str(exc))
             log.exception("Fatal error")
             start_alarm()
             try:
                 if not page.is_closed():
-                    save_screenshot(page, timestamp_name("fatal-error"))
+                    tracked_screenshot(page, timestamp_name("fatal-error"), metrics)
             except Exception:
                 pass
-            send_notification(
+            tracked_notification(
+                metrics,
                 f"Amazon Shift Catcher stopped with an error:\n{exc}",
                 title="Amazon monitor stopped",
                 priority=5,
             )
         finally:
             stop_alarm()
+            metrics.transition(MonitorState.STOPPED, log, stop_reason)
+            metrics.finish(stop_reason)
+            try:
+                session_path, latest_path = metrics.save(LOG_DIR)
+                summary = metrics.to_dict()
+                log.info(
+                    "Session metrics saved: %s | checks=%s | avg_check=%.2fs | "
+                    "avg_reload=%.2fs | 403s=%s | avg_403=%.2fs | shift_batches=%s | screenshots=%s",
+                    session_path.name,
+                    summary["checks_total"],
+                    summary["average_check_interval_seconds"],
+                    summary["average_reload_seconds"],
+                    summary["403_count"],
+                    summary["403_average_duration_seconds"],
+                    summary["shift_batches_seen"],
+                    summary["screenshots_saved"],
+                )
+                log.info("Latest metrics snapshot: %s", latest_path)
+            except Exception as exc:
+                log.warning("Could not save session metrics: %s", exc)
             log.info("Disconnected from automation. Brave has been left open.")
