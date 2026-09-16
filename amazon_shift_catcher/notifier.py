@@ -5,6 +5,27 @@ import requests
 
 log = logging.getLogger(__name__)
 
+# Routine events stay in the local log and do not consume phone-notification
+# capacity. Important events such as SHIFT FOUND, security checks, fatal/page
+# errors and recovery failures are still sent normally.
+_ROUTINE_TITLES = {
+    "amazon monitor started - priority mode",
+    "amazon 403 - recovery mode",
+    "amazon 403 cleared",
+    "amazon monitor shutdown",
+}
+
+_last_notification_status = "none"
+
+
+def get_last_notification_status() -> str:
+    """Return one of: none, skipped, sent, failed."""
+    return _last_notification_status
+
+
+def _is_routine_notification(title: str) -> bool:
+    return title.strip().lower() in _ROUTINE_TITLES
+
 
 def _send_ntfy(
     message: str,
@@ -81,14 +102,20 @@ def send_notification(
     """
     Send a phone notification using the first provider that succeeds.
 
-    Provider order:
-    1. ntfy
-    2. Telegram fallback
-
-    A provider failure never stops the shift catcher. A 429 from ntfy is not
-    retried immediately because that would add more requests while the provider
-    is rate-limiting us; Telegram is tried next when configured.
+    Routine startup/403/shutdown messages are intentionally kept local so the
+    phone channel is reserved for events that need action. Provider order for
+    important notifications is ntfy first, then Telegram fallback.
     """
+    global _last_notification_status
+
+    if _is_routine_notification(title):
+        _last_notification_status = "skipped"
+        log.info(
+            'Routine phone notification skipped to preserve notification capacity | title="%s"',
+            title,
+        )
+        return False
+
     ntfy_configured = bool(os.getenv("NTFY_TOPIC", "").strip())
     telegram_configured = bool(
         os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
@@ -96,11 +123,14 @@ def send_notification(
     )
 
     if _send_ntfy(message, title=title, priority=priority):
+        _last_notification_status = "sent"
         return True
 
     if _send_telegram(message):
+        _last_notification_status = "sent"
         return True
 
+    _last_notification_status = "failed"
     if ntfy_configured or telegram_configured:
         log.error(
             "Phone notification was NOT delivered. All configured providers failed."
