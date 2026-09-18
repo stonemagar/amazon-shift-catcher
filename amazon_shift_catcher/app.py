@@ -122,9 +122,10 @@ def tracked_screenshot(page, path: Path, metrics: SessionMetrics) -> None:
     metrics.record_screenshot()
 
 
-def tracked_notification(metrics: SessionMetrics, body: str, **kwargs) -> None:
-    send_notification(body, **kwargs)
-    metrics.record_notification()
+def tracked_notification(metrics: SessionMetrics, body: str, **kwargs) -> bool:
+    delivered = send_notification(body, **kwargs)
+    metrics.record_notification(delivered)
+    return delivered
 
 
 def choose_amazon_page(browser, my_jobs_url: str):
