@@ -299,6 +299,23 @@ def parse_telegram_page(
     return releases, older_url
 
 
+def _fallback_older_url(
+    channel_url: str,
+    releases: Iterable[TelegramRelease],
+) -> Optional[str]:
+    """Build Telegram's older-page URL when the preview omits its Older link."""
+    numeric_ids = [
+        int(release.message_id)
+        for release in releases
+        if release.message_id.isdigit()
+    ]
+    if not numeric_ids:
+        return None
+
+    base_url = channel_url.split("?", 1)[0]
+    return f"{base_url}?before={min(numeric_ids)}"
+
+
 class TelegramHistoryCollector:
     """Collect public Telegram history at a deliberately low request rate."""
 
@@ -350,6 +367,8 @@ class TelegramHistoryCollector:
             seen_urls.add(url)
 
             releases, older_url = parse_telegram_page(self.fetch_page(url), url)
+            if not older_url:
+                older_url = _fallback_older_url(self.channel_url, releases)
             page_dates: list[date] = []
 
             for release in releases:
