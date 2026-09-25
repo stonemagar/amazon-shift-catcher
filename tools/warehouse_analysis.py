@@ -13,6 +13,7 @@ from amazon_shift_catcher.release_intelligence import (
     LondonFilter,
     ReleaseHistory,
     TelegramHistoryCollector,
+    parse_telegram_export,
     summarise_releases,
 )
 
@@ -51,6 +52,13 @@ def main() -> int:
         default="data/london_releases.json",
         help="Path to the local JSON history",
     )
+    parser.add_argument(
+        "--telegram-export",
+        help=(
+            "Path to a Telegram Desktop machine-readable JSON export. "
+            "When supplied, no Telegram web request is made."
+        ),
+    )
     args = parser.parse_args()
 
     end_date = args.end or date.today()
@@ -60,7 +68,24 @@ def main() -> int:
 
     history = ReleaseHistory(args.data)
 
-    if not args.no_fetch:
+    if args.telegram_export:
+        print(
+            f"Reading Telegram export {args.telegram_export} "
+            f"for {start_date} to {end_date}..."
+        )
+        releases = parse_telegram_export(
+            args.telegram_export,
+            start_date=start_date,
+            end_date=end_date,
+        )
+        london = LondonFilter().filter(releases)
+        saved = history.merge(london)
+        print(
+            f"Parsed {len(releases)} Amazon alert posts from the export; "
+            f"{len(london)} classified as Greater London. "
+            f"Saved history contains {len(saved)} London events."
+        )
+    elif not args.no_fetch:
         print(f"Collecting Telegram history from {start_date} to {end_date}...")
         collector = TelegramHistoryCollector()
         releases = collector.collect(
