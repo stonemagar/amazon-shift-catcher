@@ -7,6 +7,7 @@ from amazon_shift_catcher.release_intelligence import (
     LondonFilter,
     ReleaseHistory,
     TelegramRelease,
+    parse_telegram_export,
     parse_telegram_page,
     summarise_releases,
 )
@@ -65,6 +66,63 @@ class ReleaseIntelligenceTests(unittest.TestCase):
         self.assertEqual(barking.hours_per_week, 25.0)
         self.assertEqual(barking.live_seconds, 6)
         self.assertIn("before=1001", older or "")
+
+    def test_parse_telegram_export(self):
+        export = {
+            "name": "UK Amazon warehouse jobs alert",
+            "type": "public_channel",
+            "messages": [
+                {
+                    "id": 58046,
+                    "type": "message",
+                    "date": "2026-09-01T00:21:24",
+                    "text": [
+                        "📍 London, England (West London) NW10 0UP\n"
+                        "🏷️ Delivery Station Warehouse Associate | 1\n"
+                        "💼 Seasonal | Reduced\n"
+                        "💰 £15.30 ",
+                        {"type": "bot_command", "text": "/hr"},
+                        "\n📅 First Day: 2026-09-13\n"
+                        "⏰ Schedule: Sun, Mon, Tue, Wed, Thu 14:00 - 20:30\n"
+                        "🕐 Hours/Week: 30\n\n🔗 ",
+                        {
+                            "type": "link",
+                            "text": (
+                                "https://www.jobsatamazon.co.uk/app#/jobDetail"
+                                "?jobId=JOB-UK-0000000212"
+                            ),
+                        },
+                        "\n\n❌ No longer available (was live for 1h 15m)",
+                    ],
+                },
+                {
+                    "id": 58047,
+                    "type": "message",
+                    "date": "2026-08-31T23:59:59",
+                    "text": "older message",
+                },
+            ],
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            export_path = Path(tmp) / "result.json"
+            export_path.write_text(
+                __import__("json").dumps(export),
+                encoding="utf-8",
+            )
+            releases = parse_telegram_export(
+                export_path,
+                start_date=date(2026, 9, 1),
+                end_date=date(2026, 9, 25),
+            )
+
+        self.assertEqual(len(releases), 1)
+        release = releases[0]
+        self.assertEqual(release.message_id, "58046")
+        self.assertEqual(release.postcode, "NW10 0UP")
+        self.assertEqual(release.job_id, "JOB-UK-0000000212")
+        self.assertEqual(release.hours_per_week, 30.0)
+        self.assertEqual(release.live_seconds, 4500)
 
     def test_london_filter_uses_lookup_for_outer_postcodes(self):
         decisions = {
