@@ -26,3 +26,5 @@ venv/
 Thumbs.db
 
 data/telegram/
+browser-profile-old/
+data/
