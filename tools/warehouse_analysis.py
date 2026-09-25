@@ -68,6 +68,13 @@ def main() -> int:
             end_date,
             max_pages=args.max_pages,
         )
+        print(
+            "Archive traversal: "
+            f"{collector.pages_fetched} page(s), "
+            f"stop={collector.stop_reason}, "
+            f"oldest={collector.oldest_observed_date}, "
+            f"newest={collector.newest_observed_date}"
+        )
         london = LondonFilter().filter(releases)
         saved = history.merge(london)
         print(
