@@ -23,8 +23,10 @@ _POSTCODE_RE = re.compile(
 )
 _JOB_ID_RE = re.compile(r"\bJOB-UK-\d+\b", re.IGNORECASE)
 _NUMBER_RE = re.compile(r"(\d+(?:\.\d+)?)")
-_LIVE_RE = re.compile(
-    r"was live for\s+(\d+(?:\.\d+)?)\s*(seconds?|secs?|minutes?|mins?)",
+_LIVE_RE = re.compile(r"was live for\s+([^\)\n]+)", re.IGNORECASE)
+_LIVE_COMPONENT_RE = re.compile(
+    r"(\d+(?:\.\d+)?)\s*"
+    r"(hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s)\b",
     re.IGNORECASE,
 )
 
@@ -94,10 +96,21 @@ def parse_live_seconds(text: str) -> Optional[int]:
     match = _LIVE_RE.search(text)
     if not match:
         return None
-    value = float(match.group(1))
-    if match.group(2).lower().startswith("min"):
-        value *= 60
-    return int(round(value))
+
+    total_seconds = 0.0
+    matched_component = False
+    for value_text, unit_text in _LIVE_COMPONENT_RE.findall(match.group(1)):
+        matched_component = True
+        value = float(value_text)
+        unit = unit_text.lower()
+        if unit.startswith(("hour", "hr")) or unit == "h":
+            total_seconds += value * 3600
+        elif unit.startswith("min") or unit == "m":
+            total_seconds += value * 60
+        else:
+            total_seconds += value
+
+    return int(round(total_seconds)) if matched_component else None
 
 
 @dataclass(frozen=True)
@@ -303,6 +316,74 @@ def parse_telegram_page(
         else None
     )
     return releases, older_url
+
+
+def _flatten_telegram_export_text(value: object) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        text_value = value.get("text", "")
+        return text_value if isinstance(text_value, str) else str(text_value)
+    if isinstance(value, list):
+        return "".join(_flatten_telegram_export_text(item) for item in value)
+    return ""
+
+
+def parse_telegram_export(
+    path: str | Path,
+    *,
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
+    channel_username: str = "amazonukjobsalert",
+) -> list[TelegramRelease]:
+    """Parse a Telegram Desktop machine-readable JSON channel export."""
+    export_path = Path(path)
+    raw = json.loads(export_path.read_text(encoding="utf-8"))
+    messages = raw.get("messages")
+    if not isinstance(messages, list):
+        raise ValueError("Telegram export does not contain a messages list")
+
+    releases: dict[str, TelegramRelease] = {}
+    page_url = f"https://t.me/{channel_username}"
+
+    for message in messages:
+        if not isinstance(message, dict) or message.get("type") != "message":
+            continue
+
+        message_id = str(message.get("id", "")).strip()
+        observed_at = str(message.get("date", "")).strip()
+        if not message_id or not observed_at:
+            continue
+
+        try:
+            observed_date = datetime.fromisoformat(
+                observed_at.replace("Z", "+00:00")
+            ).date()
+        except ValueError:
+            continue
+
+        if start_date and observed_date < start_date:
+            continue
+        if end_date and observed_date > end_date:
+            continue
+
+        text = _flatten_telegram_export_text(message.get("text", ""))
+        if not text:
+            continue
+
+        raw_message = _RawMessage(
+            post_ref=f"{channel_username}/{message_id}",
+            observed_at=observed_at,
+            text=text,
+        )
+        release = _release_from_raw(raw_message, page_url)
+        if release is not None:
+            releases[release.message_id] = release
+
+    return sorted(
+        releases.values(),
+        key=lambda item: item.observed_datetime,
+    )
 
 
 def _fallback_older_url(
