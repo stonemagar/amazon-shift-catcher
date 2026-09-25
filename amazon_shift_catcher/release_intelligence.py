@@ -171,6 +171,12 @@ class _TelegramHTMLParser(HTMLParser):
     ) -> None:
         attr = self._attrs(attrs)
 
+        if tag == "link":
+            rel_tokens = set(attr.get("rel", "").split())
+            if "prev" in rel_tokens and attr.get("href"):
+                self.older_href = attr["href"]
+            return
+
         if tag == "div":
             self._div_depth += 1
             classes = set(attr.get("class", "").split())
@@ -335,6 +341,10 @@ class TelegramHistoryCollector:
             "User-Agent",
             "amazon-shift-catcher/1.0 historical-release-research",
         )
+        self.pages_fetched = 0
+        self.stop_reason = "not_started"
+        self.oldest_observed_date: Optional[date] = None
+        self.newest_observed_date: Optional[date] = None
 
     def fetch_page(self, url: str) -> str:
         response = self.session.get(url, timeout=self.timeout_seconds)
@@ -359,30 +369,71 @@ class TelegramHistoryCollector:
 
         url: Optional[str] = self.channel_url
         seen_urls: set[str] = set()
+        seen_page_signatures: set[tuple[str, ...]] = set()
         collected: dict[str, TelegramRelease] = {}
 
+        self.pages_fetched = 0
+        self.stop_reason = "running"
+        self.oldest_observed_date = None
+        self.newest_observed_date = None
+
         for page_index in range(max_pages):
-            if not url or url in seen_urls:
+            if not url:
+                self.stop_reason = "no_older_page"
+                break
+            if url in seen_urls:
+                self.stop_reason = "repeated_page_url"
                 break
             seen_urls.add(url)
 
-            releases, older_url = parse_telegram_page(self.fetch_page(url), url)
+            html = self.fetch_page(url)
+            self.pages_fetched += 1
+            releases, older_url = parse_telegram_page(html, url)
+
+            if not releases:
+                self.stop_reason = "no_parseable_release_posts"
+                break
+
+            signature = tuple(sorted(release.message_id for release in releases))
+            if signature in seen_page_signatures:
+                self.stop_reason = "repeated_page_content"
+                break
+            seen_page_signatures.add(signature)
+
             if not older_url:
                 older_url = _fallback_older_url(self.channel_url, releases)
-            page_dates: list[date] = []
 
+            page_dates: list[date] = []
             for release in releases:
                 observed_date = release.observed_datetime.date()
                 page_dates.append(observed_date)
+
+                if (
+                    self.oldest_observed_date is None
+                    or observed_date < self.oldest_observed_date
+                ):
+                    self.oldest_observed_date = observed_date
+                if (
+                    self.newest_observed_date is None
+                    or observed_date > self.newest_observed_date
+                ):
+                    self.newest_observed_date = observed_date
+
                 if start_date <= observed_date <= end_date:
                     collected[release.message_id] = release
 
-            if page_dates and min(page_dates) < start_date:
+            # Stop only when the entire parsed page is already older than
+            # the requested range. A single pinned/out-of-order old post must
+            # not terminate the backfill.
+            if page_dates and max(page_dates) < start_date:
+                self.stop_reason = "reached_before_start_date"
                 break
 
             url = older_url
             if url and page_index + 1 < max_pages:
                 time.sleep(self.pause_seconds)
+        else:
+            self.stop_reason = "max_pages_reached"
 
         return sorted(
             collected.values(),
