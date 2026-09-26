@@ -43,6 +43,15 @@ def main() -> int:
     )
     parser.add_argument("--max-pages", type=int, default=120)
     parser.add_argument(
+        "--session-gap-minutes",
+        type=float,
+        default=15.0,
+        help=(
+            "Maximum gap between repeated alerts for the same job ID "
+            "to count as one probable release session (default: 15)"
+        ),
+    )
+    parser.add_argument(
         "--no-fetch",
         action="store_true",
         help="Analyse the saved history without contacting Telegram",
@@ -114,6 +123,7 @@ def main() -> int:
         saved,
         start_date=start_date,
         end_date=end_date,
+        session_gap_minutes=args.session_gap_minutes,
     )
 
     print()
@@ -132,9 +142,9 @@ def main() -> int:
         return 0
 
     header = (
-        f"{'Job ID':<22} {'Area / postcode':<42} "
-        f"{'Events':>6} {'Days':>5} {'Schedules':>9} "
-        f"{'Last observed':<16} {'Hours'}"
+        f"{'Job ID':<22} {'Area / postcode':<34} "
+        f"{'Msgs':>5} {'Sessions':>8} {'20h':>4} {'Days':>5} "
+        f"{'Schedules':>9} {'Peak hrs':<10} {'Last observed':<16} {'Hours'}"
     )
     print(header)
     print("-" * len(header))
@@ -143,28 +153,41 @@ def main() -> int:
         area = ", ".join(item.locations)
         postcodes = ", ".join(item.postcodes)
         label = f"{area} [{postcodes}]"
-        if len(label) > 41:
-            label = label[:38] + "..."
+        if len(label) > 33:
+            label = label[:30] + "..."
 
         hours = ",".join(
             str(int(value)) if float(value).is_integer() else str(value)
             for value in item.hours_seen
         )
 
+        peak_hours = ",".join(
+            f"{hour:02d}:00" for hour in item.common_session_hours
+        )
+
         print(
-            f"{item.job_id:<22} {label:<42} "
-            f"{item.observed_release_events:>6} "
+            f"{item.job_id:<22} {label:<34} "
+            f"{item.observed_release_events:>5} "
+            f"{item.probable_release_sessions:>8} "
+            f"{item.sessions_with_20_hours:>4} "
             f"{item.active_days:>5} "
             f"{item.unique_schedules:>9} "
+            f"{peak_hours:<10} "
             f"{display_time(item.last_observed_at):<16} "
             f"{hours}"
         )
 
     print()
     print(
-        "Events are distinct Telegram message IDs. "
-        "The same schedule can appear again later and is kept as a "
-        "separate observed event."
+        f"Sessions are inferred by grouping repeated alerts for the same "
+        f"job ID when consecutive messages are no more than "
+        f"{args.session_gap_minutes:g} minutes apart. "
+        "They are not confirmed Amazon release events."
+    )
+    print(
+        "20h is the number of probable sessions containing at least one "
+        "20-hours/week option. Peak hrs are Telegram observed session-start "
+        "hours and may lag the actual Amazon release time."
     )
     return 0
 
