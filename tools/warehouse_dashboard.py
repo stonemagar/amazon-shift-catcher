@@ -26,6 +26,14 @@ WEEKDAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 _TIME_RE = re.compile(r"\b(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})\b")
 
 
+def _schedule_days(schedule: str) -> set[str]:
+    return {
+        day
+        for day in WEEKDAYS
+        if re.search(rf"\b{re.escape(day)}\b", schedule or "", re.IGNORECASE)
+    }
+
+
 def _resolve_path(value: str) -> Path:
     path = Path(value).expanduser()
     if path.is_absolute():
@@ -277,9 +285,15 @@ def main() -> None:
         )
         only_20h = st.checkbox("Only 20-hour options", value=False)
         selected_days = st.multiselect(
-            "Working days in schedule",
+            "Allowed working days",
             options=list(WEEKDAYS),
             placeholder="Any day",
+            help=(
+                "When days are selected, a shift is shown only if every "
+                "working day in its schedule is inside your selected days. "
+                "For example, selecting Wed-Sun excludes any shift containing "
+                "Mon or Tue."
+            ),
         )
         start_hour_range = st.slider(
             "Shift start hour",
@@ -325,12 +339,13 @@ def main() -> None:
         filtered = filtered[filtered["weekly_hours"].isin(hour_filter)]
 
     if selected_days:
-        day_pattern = "|".join(re.escape(day) for day in selected_days)
+        allowed_days = set(selected_days)
         filtered = filtered[
-            filtered["schedule"].fillna("").str.contains(
-                day_pattern,
-                case=False,
-                regex=True,
+            filtered["schedule"].fillna("").map(
+                lambda schedule: (
+                    bool(_schedule_days(schedule))
+                    and _schedule_days(schedule).issubset(allowed_days)
+                )
             )
         ]
 
