@@ -246,8 +246,10 @@ def main() -> None:
         selected_dates = st.date_input(
             "Observed date range",
             value=(min_date, max_date),
-            min_value=min_date,
-            max_value=max_date,
+            help=(
+                "Choose any start and end dates. Dates outside the current "
+                "Telegram export are allowed but will simply return no records."
+            ),
         )
         if isinstance(selected_dates, tuple) and len(selected_dates) == 2:
             start_date, end_date = selected_dates
