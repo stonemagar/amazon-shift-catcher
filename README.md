@@ -110,3 +110,45 @@ The tests currently cover priority ranking, state transitions and metrics persis
 Keep the repository private. Never commit `.env`, `config.json`, browser profiles, logs, screenshots, cookies, passwords, OTPs, security codes or personal documents.
 
 This project does **not** automate assessments, CAPTCHAs, OTPs, identity checks, right-to-work checks, security challenges or unfamiliar declarations.
+
+
+## Warehouse intelligence dashboard
+
+The project includes a local Streamlit dashboard for analysing the Telegram
+warehouse-release export without uploading `result.json` to GitHub.
+
+Install/update dependencies:
+
+```powershell
+pip install -r requirements.txt
+```
+
+Launch the dashboard:
+
+```powershell
+streamlit run tools\warehouse_dashboard.py
+```
+
+By default it reads:
+
+```text
+data\telegram\result.json
+```
+
+Available filters include:
+
+- observed date range
+- Amazon Job ID
+- area, postcode or Job ID text search
+- weekly hours
+- 20-hour-only shifts
+- working days in the schedule
+- shift start-hour range
+- probable release-session gap
+
+The dashboard shows warehouse summaries, probable release sessions, 20-hour
+session counts, active job IDs, schedule options, daily activity charts and a
+downloadable filtered CSV.
+
+Probable sessions are inferred from delayed Telegram observations and are not
+confirmed Amazon release events.
