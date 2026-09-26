@@ -7,6 +7,7 @@ from amazon_shift_catcher.release_intelligence import (
     LondonFilter,
     ReleaseHistory,
     TelegramRelease,
+    cluster_release_sessions,
     parse_telegram_export,
     parse_telegram_page,
     summarise_releases,
@@ -143,6 +144,84 @@ class ReleaseIntelligenceTests(unittest.TestCase):
             ["JOB-UK-0000000206"],
         )
 
+    def test_cluster_release_sessions_groups_nearby_messages(self):
+        releases = [
+            TelegramRelease(
+                message_id="1",
+                observed_at="2026-09-25T10:00:00+00:00",
+                location="London",
+                postcode="NW10 0UP",
+                job_id="JOB-UK-0000000212",
+                hours_per_week=20,
+            ),
+            TelegramRelease(
+                message_id="2",
+                observed_at="2026-09-25T10:07:00+00:00",
+                location="London",
+                postcode="NW10 0UP",
+                job_id="JOB-UK-0000000212",
+                hours_per_week=30,
+            ),
+            TelegramRelease(
+                message_id="3",
+                observed_at="2026-09-25T10:30:00+00:00",
+                location="London",
+                postcode="NW10 0UP",
+                job_id="JOB-UK-0000000212",
+                hours_per_week=30,
+            ),
+        ]
+
+        sessions = cluster_release_sessions(releases, gap_minutes=15)
+
+        self.assertEqual(len(sessions), 2)
+        self.assertEqual(sessions[0].message_count, 2)
+        self.assertTrue(sessions[0].has_20_hour_option)
+        self.assertEqual(sessions[1].message_count, 1)
+
+    def test_multiple_shift_options_are_preserved(self):
+        export = {
+            "name": "UK Amazon warehouse jobs alert",
+            "type": "public_channel",
+            "messages": [
+                {
+                    "id": 70000,
+                    "type": "message",
+                    "date": "2026-09-10T08:00:00",
+                    "text": (
+                        "📍 London, England (West London) NW10 0UP\n"
+                        "🏷️ Delivery Station Warehouse Associate | 2\n"
+                        "💼 Seasonal | Part-time;Reduced\n"
+                        "💰 £15.30 /hr\n\n"
+                        "📋 Shift 1:\n"
+                        "📅 First Day: 2026-09-20\n"
+                        "⏰ Schedule: Sun, Mon, Tue, Wed, Thu 09:00 - 13:00\n"
+                        "🕐 Hours/Week: 20\n\n"
+                        "📋 Shift 2:\n"
+                        "📅 First Day: 2026-09-21\n"
+                        "⏰ Schedule: Mon, Tue, Wed, Thu, Fri 14:00 - 20:30\n"
+                        "🕐 Hours/Week: 30\n\n"
+                        "🔗 https://www.jobsatamazon.co.uk/app#/jobDetail?"
+                        "jobId=JOB-UK-0000000212"
+                    ),
+                }
+            ],
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            export_path = Path(tmp) / "result.json"
+            export_path.write_text(
+                __import__("json").dumps(export),
+                encoding="utf-8",
+            )
+            releases = parse_telegram_export(export_path)
+
+        self.assertEqual(len(releases), 1)
+        release = releases[0]
+        self.assertEqual(release.hours_per_week_options, (20.0, 30.0))
+        self.assertEqual(len(release.schedule_fingerprints), 2)
+        self.assertTrue(release.has_20_hour_option)
+
     def test_history_deduplicates_same_message_id(self):
         release = TelegramRelease(
             message_id="1",
@@ -201,8 +280,11 @@ class ReleaseIntelligenceTests(unittest.TestCase):
 
         self.assertEqual(len(summaries), 1)
         self.assertEqual(summaries[0].observed_release_events, 2)
+        self.assertEqual(summaries[0].probable_release_sessions, 2)
+        self.assertEqual(summaries[0].sessions_with_20_hours, 2)
         self.assertEqual(summaries[0].active_days, 2)
         self.assertEqual(summaries[0].unique_schedules, 1)
+        self.assertEqual(summaries[0].common_session_hours, (1, 3))
         self.assertEqual(summaries[0].median_live_seconds, 6.0)
 
 
