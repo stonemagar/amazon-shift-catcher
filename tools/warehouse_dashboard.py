@@ -42,13 +42,29 @@ def _resolve_path(value: str) -> Path:
 
 
 @st.cache_data(show_spinner=False)
-def _load_london_releases(
+def _load_releases(
     export_path: str,
     modified_ns: int,
+    london_only: bool,
 ) -> list[TelegramRelease]:
     del modified_ns
     releases = parse_telegram_export(export_path)
-    return LondonFilter().filter(releases)
+    if london_only:
+        return LondonFilter().filter(releases)
+    return releases
+
+
+def _nation_from_location(location: str) -> str:
+    value = (location or "").lower()
+    if "northern ireland" in value:
+        return "Northern Ireland"
+    if "scotland" in value:
+        return "Scotland"
+    if "wales" in value:
+        return "Wales"
+    if "england" in value:
+        return "England"
+    return "Unknown"
 
 
 def _release_options(release: TelegramRelease) -> list[dict]:
@@ -76,6 +92,7 @@ def _release_options(release: TelegramRelease) -> list[dict]:
                 "observed_at": release.observed_datetime,
                 "job_id": release.job_id,
                 "location": release.location,
+                "nation": _nation_from_location(release.location),
                 "postcode": release.postcode,
                 "role": release.role,
                 "employment": release.employment,
@@ -204,15 +221,15 @@ def _summary_dataframe(
 
 def main() -> None:
     st.set_page_config(
-        page_title="Amazon London Shift Intelligence",
+        page_title="Amazon UK Shift Intelligence",
         page_icon="📦",
         layout="wide",
     )
-    st.title("Amazon London Shift Intelligence")
+    st.title("Amazon UK Shift Intelligence")
     st.caption(
-        "Filter historical London Amazon shift alerts from your local Telegram "
-        "export. Telegram timestamps are delayed observations, not official "
-        "Amazon release times."
+        "Filter historical Amazon shift alerts across the UK from your local "
+        "Telegram export. Telegram timestamps are delayed observations, not "
+        "official Amazon release times."
     )
 
     with st.sidebar:
@@ -220,6 +237,15 @@ def main() -> None:
         export_value = st.text_input(
             "Telegram result.json",
             value=str(DEFAULT_EXPORT.relative_to(ROOT)),
+        )
+        coverage = st.selectbox(
+            "UK coverage",
+            options=("Greater London", "All UK"),
+            index=0,
+            help=(
+                "Keep Greater London for your current search, or switch to "
+                "All UK whenever you want to analyse other locations."
+            ),
         )
 
     export_path = _resolve_path(export_value)
@@ -230,20 +256,35 @@ def main() -> None:
         )
         st.stop()
 
-    with st.spinner("Reading Telegram export and filtering Greater London..."):
-        london_releases = _load_london_releases(
+    london_only = coverage == "Greater London"
+    spinner_text = (
+        "Reading Telegram export and filtering Greater London..."
+        if london_only
+        else "Reading Telegram export for all UK locations..."
+    )
+    with st.spinner(spinner_text):
+        scoped_releases = _load_releases(
             str(export_path),
             export_path.stat().st_mtime_ns,
+            london_only,
         )
 
-    options = _options_dataframe(london_releases)
+    options = _options_dataframe(scoped_releases)
     if options.empty:
-        st.warning("No Greater London Amazon shift records were found.")
+        st.warning(f"No Amazon shift records were found for {coverage}.")
         st.stop()
 
     min_date = options["observed_date"].min()
     max_date = options["observed_date"].max()
     all_job_ids = sorted(options["job_id"].dropna().unique().tolist())
+    all_nations = sorted(
+        value
+        for value in options["nation"].dropna().unique().tolist()
+        if value != "Unknown"
+    )
+    all_locations = sorted(
+        value for value in options["location"].dropna().unique().tolist() if value
+    )
     all_hours = sorted(
         float(value)
         for value in options["weekly_hours"].dropna().unique().tolist()
@@ -266,6 +307,21 @@ def main() -> None:
         else:
             start_date = end_date = selected_dates
 
+        selected_nations = st.multiselect(
+            "Nation",
+            options=all_nations,
+            placeholder="All nations",
+            help="Useful when UK coverage is set to All UK.",
+        )
+        selected_locations = st.multiselect(
+            "Area / location",
+            options=all_locations,
+            placeholder="All areas",
+            help=(
+                "Choose one or more exact areas from the Telegram data. "
+                "Leave empty to include every area in the selected UK coverage."
+            ),
+        )
         selected_jobs = st.multiselect(
             "Job ID",
             options=all_job_ids,
@@ -273,7 +329,7 @@ def main() -> None:
         )
         location_search = st.text_input(
             "Area / postcode contains",
-            placeholder="e.g. Croydon, Enfield, NW10",
+            placeholder="e.g. Croydon, Enfield, Manchester, NW10",
         )
         selected_hours = st.multiselect(
             "Weekly hours",
@@ -318,6 +374,12 @@ def main() -> None:
         & (options["observed_date"] <= end_date)
     ].copy()
 
+    if selected_nations:
+        filtered = filtered[filtered["nation"].isin(selected_nations)]
+
+    if selected_locations:
+        filtered = filtered[filtered["location"].isin(selected_locations)]
+
     if selected_jobs:
         filtered = filtered[filtered["job_id"].isin(selected_jobs)]
 
@@ -357,7 +419,7 @@ def main() -> None:
         ]
 
     filtered_releases = _rebuild_filtered_releases(
-        london_releases,
+        scoped_releases,
         filtered,
     )
     sessions = cluster_release_sessions(
@@ -453,7 +515,7 @@ def main() -> None:
         "Download filtered CSV",
         data=display.to_csv(index=False).encode("utf-8"),
         file_name=(
-            f"london-amazon-shifts-{start_date}-to-{end_date}.csv"
+            f"amazon-uk-shifts-{start_date}-to-{end_date}.csv"
         ),
         mime="text/csv",
     )
