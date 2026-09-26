@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import re
 import time
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass
 from datetime import date, datetime
 from html.parser import HTMLParser
@@ -16,6 +16,7 @@ import requests
 
 
 DEFAULT_CHANNEL_URL = "https://t.me/s/amazonukjobsalert"
+DEFAULT_RELEASE_SESSION_GAP_MINUTES = 15
 
 _POSTCODE_RE = re.compile(
     r"\b([A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2})\b",
@@ -126,6 +127,9 @@ class TelegramRelease:
     first_day: str = ""
     schedule: str = ""
     hours_per_week: Optional[float] = None
+    first_day_options: tuple[str, ...] = ()
+    schedule_options: tuple[str, ...] = ()
+    hours_per_week_options: tuple[float, ...] = ()
     live_seconds: Optional[int] = None
     source_url: str = ""
 
@@ -134,22 +138,59 @@ class TelegramRelease:
         return datetime.fromisoformat(self.observed_at.replace("Z", "+00:00"))
 
     @property
+    def all_hours_per_week(self) -> tuple[float, ...]:
+        if self.hours_per_week_options:
+            return self.hours_per_week_options
+        if self.hours_per_week is None:
+            return ()
+        return (self.hours_per_week,)
+
+    @property
+    def schedule_fingerprints(self) -> tuple[str, ...]:
+        first_days = self.first_day_options or ((self.first_day,) if self.first_day else ())
+        schedules = self.schedule_options or ((self.schedule,) if self.schedule else ())
+        hours = self.all_hours_per_week
+
+        option_count = max(len(first_days), len(schedules), len(hours), 1)
+        fingerprints: list[str] = []
+        for index in range(option_count):
+            first_day = first_days[index] if index < len(first_days) else ""
+            schedule = schedules[index] if index < len(schedules) else ""
+            hour_value = hours[index] if index < len(hours) else None
+            values = (
+                self.job_id,
+                self.postcode,
+                first_day,
+                schedule,
+                "" if hour_value is None else str(hour_value),
+            )
+            fingerprints.append(
+                "|".join(value.strip().lower() for value in values)
+            )
+        return tuple(fingerprints)
+
+    @property
     def schedule_fingerprint(self) -> str:
-        values = (
-            self.job_id,
-            self.postcode,
-            self.first_day,
-            self.schedule,
-            "" if self.hours_per_week is None else str(self.hours_per_week),
-        )
-        return "|".join(value.strip().lower() for value in values)
+        return self.schedule_fingerprints[0]
+
+    @property
+    def has_20_hour_option(self) -> bool:
+        return any(abs(value - 20.0) < 1e-9 for value in self.all_hours_per_week)
 
     def to_dict(self) -> dict:
         return asdict(self)
 
     @classmethod
     def from_dict(cls, data: dict) -> "TelegramRelease":
-        return cls(**data)
+        payload = dict(data)
+        for field_name in (
+            "first_day_options",
+            "schedule_options",
+            "hours_per_week_options",
+        ):
+            if field_name in payload and isinstance(payload[field_name], list):
+                payload[field_name] = tuple(payload[field_name])
+        return cls(**payload)
 
 
 @dataclass
@@ -261,12 +302,25 @@ def _release_from_raw(raw: _RawMessage, page_url: str) -> Optional[TelegramRelea
     role_line = next((line for line in lines if line.startswith("🏷")), "")
     employment_line = next((line for line in lines if line.startswith("💼")), "")
     pay_line = next((line for line in lines if line.startswith("💰")), "")
-    first_day_line = next((line for line in lines if "First Day:" in line), "")
-    schedule_line = next((line for line in lines if "Schedule:" in line), "")
-    hours_line = next((line for line in lines if "Hours/Week:" in line), "")
+    first_day_values = [
+        line.split("First Day:", 1)[1].strip()
+        for line in lines
+        if "First Day:" in line
+    ]
+    schedule_values = [
+        line.split("Schedule:", 1)[1].strip()
+        for line in lines
+        if "Schedule:" in line
+    ]
+    hours_values: list[float] = []
+    for line in lines:
+        if "Hours/Week:" not in line:
+            continue
+        hours_match = _NUMBER_RE.search(line.split("Hours/Week:", 1)[1])
+        if hours_match:
+            hours_values.append(float(hours_match.group(1)))
 
     pay_match = _NUMBER_RE.search(pay_line.replace(",", ""))
-    hours_match = _NUMBER_RE.search(hours_line)
 
     post_ref = raw.post_ref.strip()
     message_id = post_ref.rsplit("/", 1)[-1] if "/" in post_ref else post_ref
@@ -281,17 +335,12 @@ def _release_from_raw(raw: _RawMessage, page_url: str) -> Optional[TelegramRelea
         role=role_line.lstrip("🏷️").strip(),
         employment=employment_line.lstrip("💼").strip(),
         pay_gbp_per_hour=float(pay_match.group(1)) if pay_match else None,
-        first_day=(
-            first_day_line.split("First Day:", 1)[1].strip()
-            if "First Day:" in first_day_line
-            else ""
-        ),
-        schedule=(
-            schedule_line.split("Schedule:", 1)[1].strip()
-            if "Schedule:" in schedule_line
-            else ""
-        ),
-        hours_per_week=float(hours_match.group(1)) if hours_match else None,
+        first_day=first_day_values[0] if first_day_values else "",
+        schedule=schedule_values[0] if schedule_values else "",
+        hours_per_week=hours_values[0] if hours_values else None,
+        first_day_options=tuple(first_day_values),
+        schedule_options=tuple(schedule_values),
+        hours_per_week_options=tuple(hours_values),
         live_seconds=parse_live_seconds(text),
         source_url=source_url,
     )
@@ -661,13 +710,86 @@ class ReleaseHistory:
 
 
 @dataclass(frozen=True)
+class ReleaseSession:
+    job_id: str
+    started_at: str
+    last_observed_at: str
+    message_count: int
+    has_20_hour_option: bool
+
+    @property
+    def started_datetime(self) -> datetime:
+        return datetime.fromisoformat(self.started_at.replace("Z", "+00:00"))
+
+
+def cluster_release_sessions(
+    releases: Iterable[TelegramRelease],
+    *,
+    gap_minutes: float = DEFAULT_RELEASE_SESSION_GAP_MINUTES,
+) -> list[ReleaseSession]:
+    """
+    Group rapid repeated Telegram messages into probable release sessions.
+
+    Messages for the same Amazon job ID belong to the same session while the
+    gap between consecutive observations is no greater than gap_minutes.
+    These are inferred sessions, not confirmed Amazon release events.
+    """
+    if gap_minutes < 0:
+        raise ValueError("gap_minutes must be non-negative")
+
+    grouped: dict[str, list[TelegramRelease]] = defaultdict(list)
+    for release in releases:
+        grouped[release.job_id].append(release)
+
+    sessions: list[ReleaseSession] = []
+    threshold_seconds = gap_minutes * 60.0
+
+    for job_id, items in grouped.items():
+        ordered = sorted(items, key=lambda item: item.observed_datetime)
+        current: list[TelegramRelease] = []
+
+        def finish_current() -> None:
+            if not current:
+                return
+            sessions.append(
+                ReleaseSession(
+                    job_id=job_id,
+                    started_at=current[0].observed_at,
+                    last_observed_at=current[-1].observed_at,
+                    message_count=len(current),
+                    has_20_hour_option=any(
+                        item.has_20_hour_option for item in current
+                    ),
+                )
+            )
+
+        for item in ordered:
+            if current:
+                gap_seconds = (
+                    item.observed_datetime - current[-1].observed_datetime
+                ).total_seconds()
+                if gap_seconds > threshold_seconds:
+                    finish_current()
+                    current = []
+            current.append(item)
+
+        finish_current()
+
+    return sorted(sessions, key=lambda item: item.started_datetime)
+
+
+@dataclass(frozen=True)
 class WarehouseSummary:
     job_id: str
     locations: tuple[str, ...]
     postcodes: tuple[str, ...]
     observed_release_events: int
+    probable_release_sessions: int
+    sessions_with_20_hours: int
     active_days: int
     unique_schedules: int
+    common_session_hours: tuple[int, ...]
+    median_messages_per_session: float
     first_observed_at: str
     last_observed_at: str
     hours_seen: tuple[float, ...]
@@ -679,6 +801,7 @@ def summarise_releases(
     *,
     start_date: Optional[date] = None,
     end_date: Optional[date] = None,
+    session_gap_minutes: float = DEFAULT_RELEASE_SESSION_GAP_MINUTES,
 ) -> list[WarehouseSummary]:
     grouped: dict[str, list[TelegramRelease]] = defaultdict(list)
 
@@ -700,10 +823,29 @@ def summarise_releases(
         ]
         hours = sorted(
             {
-                item.hours_per_week
+                hour_value
                 for item in ordered
-                if item.hours_per_week is not None
+                for hour_value in item.all_hours_per_week
             }
+        )
+        schedule_fingerprints = {
+            fingerprint
+            for item in ordered
+            for fingerprint in item.schedule_fingerprints
+        }
+        sessions = cluster_release_sessions(
+            ordered,
+            gap_minutes=session_gap_minutes,
+        )
+        session_hour_counts = Counter(
+            session.started_datetime.hour for session in sessions
+        )
+        common_session_hours = tuple(
+            hour
+            for hour, _count in sorted(
+                session_hour_counts.items(),
+                key=lambda pair: (-pair[1], pair[0]),
+            )[:3]
         )
 
         summaries.append(
@@ -714,11 +856,19 @@ def summarise_releases(
                 observed_release_events=len(
                     {item.message_id for item in ordered}
                 ),
+                probable_release_sessions=len(sessions),
+                sessions_with_20_hours=sum(
+                    session.has_20_hour_option for session in sessions
+                ),
                 active_days=len(
                     {item.observed_datetime.date() for item in ordered}
                 ),
-                unique_schedules=len(
-                    {item.schedule_fingerprint for item in ordered}
+                unique_schedules=len(schedule_fingerprints),
+                common_session_hours=common_session_hours,
+                median_messages_per_session=(
+                    float(median(session.message_count for session in sessions))
+                    if sessions
+                    else 0.0
                 ),
                 first_observed_at=ordered[0].observed_at,
                 last_observed_at=ordered[-1].observed_at,
@@ -733,7 +883,7 @@ def summarise_releases(
 
     summaries.sort(
         key=lambda item: (
-            -item.observed_release_events,
+            -item.probable_release_sessions,
             -item.active_days,
             -item.unique_schedules,
             -datetime.fromisoformat(
