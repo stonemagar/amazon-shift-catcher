@@ -37,6 +37,7 @@ class JobCandidate:
     title: object
     card: object
     text: str
+    location: str | None
 
 
 def normalise_location_terms(raw: str) -> list[str]:
@@ -61,6 +62,48 @@ def card_requires_detail_location_check(text: str) -> bool:
     """Only ambiguous multi-location cards need opening to discover their site."""
     compact = " ".join(text.split())
     return bool(MULTIPLE_LOCATIONS_RE.search(compact))
+
+
+def extract_card_location(raw_text: str) -> str | None:
+    """Extract the visible place line from one Amazon search-result card."""
+    if card_requires_detail_location_check(raw_text):
+        return None
+
+    lines = [" ".join(line.split()).strip() for line in raw_text.splitlines()]
+    lines = [line for line in lines if line]
+    if not lines:
+        return None
+
+    ignored_prefixes = (
+        "type:",
+        "duration:",
+        "pay rate:",
+        "job id:",
+        "schedule:",
+        "start date:",
+        "end date:",
+        "hours:",
+    )
+
+    candidates = []
+    for line in lines:
+        lower = line.casefold()
+        if "warehouse associate" in lower:
+            continue
+        if lower.startswith(ignored_prefixes):
+            continue
+        if lower in {"apply", "share"}:
+            continue
+        candidates.append(line)
+
+    if not candidates:
+        return None
+
+    # The Amazon card layout shown by the site places the visible location last.
+    location = candidates[-1]
+    if len(location) > 160:
+        return None
+    return location
 
 
 def page_is_blocked(page: Page) -> bool:
@@ -155,6 +198,12 @@ def read_warehouse_job_cards(page: Page) -> list[JobCandidate]:
             continue
 
         card, text = _card_ancestor(title)
+        try:
+            raw_card_text = card.inner_text(timeout=1200)
+        except Exception:
+            raw_card_text = text
+        location = extract_card_location(raw_card_text)
+
         signature = " ".join(text.split()).casefold()
         if not signature or signature in seen:
             continue
@@ -166,6 +215,7 @@ def read_warehouse_job_cards(page: Page) -> list[JobCandidate]:
                 title=title,
                 card=card,
                 text=text,
+                location=location,
             )
         )
 
