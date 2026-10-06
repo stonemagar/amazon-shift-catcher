@@ -23,12 +23,14 @@ from .job_search_browser import (
     text_matches_location,
     wait_for_manual_login,
 )
+from .location_storage import save_unique_locations
 from .notifier import send_notification
 
 
 ROOT = Path(__file__).resolve().parent.parent
 LOG_DIR = ROOT / "logs"
 SCREENSHOT_DIR = ROOT / "screenshots"
+LOCATION_STORE = ROOT / "data" / "job_search_locations.json"
 
 
 class JobSearchState(str, Enum):
@@ -137,6 +139,19 @@ def find_desired_job(page, desired_locations: list[str], log):
 
     log.info("Found %s visible Warehouse Associate card(s).", len(cards))
 
+    visible_locations = [
+        candidate.location
+        for candidate in cards
+        if candidate.location
+    ]
+    added_locations = save_unique_locations(LOCATION_STORE, visible_locations)
+    if added_locations:
+        log.info(
+            "Saved %s new unique card location(s): %s",
+            len(added_locations),
+            ", ".join(added_locations),
+        )
+
     for index in range(len(cards)):
         current_cards = read_warehouse_job_cards(page)
         if index >= len(current_cards):
@@ -151,7 +166,7 @@ def find_desired_job(page, desired_locations: list[str], log):
         )
 
         visible_location_matches = text_matches_location(
-            candidate.text,
+            candidate.location or candidate.text,
             desired_locations,
         )
 
