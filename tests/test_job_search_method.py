@@ -2,6 +2,7 @@ import unittest
 
 from amazon_shift_catcher.job_search_browser import (
     WAREHOUSE_TITLE_RE,
+    card_requires_detail_location_check,
     normalise_location_terms,
     text_matches_location,
 )
@@ -26,6 +27,23 @@ class JobSearchMethodTests(unittest.TestCase):
         text = "Warehouse Associate Work address: Dartford, Kent DA1"
         self.assertTrue(text_matches_location(text, ["wembley", "DA1"]))
         self.assertFalse(text_matches_location(text, ["wembley", "croydon"]))
+
+    def test_only_multiple_location_cards_require_detail_check(self):
+        self.assertTrue(
+            card_requires_detail_location_check(
+                "Warehouse Associate - Multiple on site locations available"
+            )
+        )
+        self.assertTrue(
+            card_requires_detail_location_check(
+                "Warehouse Associate - Multiple on-site locations available"
+            )
+        )
+        self.assertFalse(
+            card_requires_detail_location_check(
+                "Delivery Station Warehouse Associate Motherwell, Scotland"
+            )
+        )
 
     def test_warehouse_title_accepts_amazon_role_prefixes(self):
         self.assertIsNotNone(WAREHOUSE_TITLE_RE.match("Warehouse Associate"))
