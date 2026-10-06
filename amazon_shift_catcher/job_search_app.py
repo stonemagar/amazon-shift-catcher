@@ -11,6 +11,7 @@ from playwright.sync_api import sync_playwright
 
 from .alarm import start_alarm, stop_alarm
 from .job_search_browser import (
+    card_requires_detail_location_check,
     find_apply_button,
     normalise_location_terms,
     open_job_candidate,
@@ -124,7 +125,12 @@ def _notify(body: str, **kwargs) -> None:
 
 
 def find_desired_job(page, desired_locations: list[str], log):
-    """Inspect visible Warehouse Associate cards and stop on a matching details page."""
+    """Use the location shown on each result card before opening any job.
+
+    A normal card already exposes its place/location, so non-matching cards are skipped
+    without navigation. Only cards that explicitly say "multiple on site locations
+    available" are opened to inspect the detailed location.
+    """
     cards = read_warehouse_job_cards(page)
     if not cards:
         return None
@@ -132,7 +138,6 @@ def find_desired_job(page, desired_locations: list[str], log):
     log.info("Found %s visible Warehouse Associate card(s).", len(cards))
 
     for index in range(len(cards)):
-        # Re-read each time because returning from an SPA details route can replace the DOM.
         current_cards = read_warehouse_job_cards(page)
         if index >= len(current_cards):
             break
@@ -145,15 +150,22 @@ def find_desired_job(page, desired_locations: list[str], log):
             candidate.text[:350] or "<no readable card text>",
         )
 
-        open_job_candidate(page, candidate)
+        visible_location_matches = text_matches_location(
+            candidate.text,
+            desired_locations,
+        )
 
-        if page_is_blocked(page):
-            raise RuntimeError("Amazon returned a 403 / request-blocked page.")
+        if visible_location_matches:
+            log.info(
+                "Desired location matched directly on the result card. "
+                "Opening this matching card only."
+            )
+            open_job_candidate(page, candidate)
 
-        detail_text = read_job_detail_text(page)
-        combined_text = f"{candidate.text} {detail_text}"
+            if page_is_blocked(page):
+                raise RuntimeError("Amazon returned a 403 / request-blocked page.")
 
-        if text_matches_location(combined_text, desired_locations):
+            detail_text = read_job_detail_text(page)
             apply_button = find_apply_button(page)
             if apply_button is None:
                 log.warning(
@@ -166,7 +178,39 @@ def find_desired_job(page, desired_locations: list[str], log):
                 "url": page.url,
             }
 
-        log.info("Location did not match this card. Returning to search results.")
+        if not card_requires_detail_location_check(candidate.text):
+            log.info(
+                "Visible card location does not match. Skipping this card without opening it."
+            )
+            continue
+
+        log.info(
+            "Card says multiple on site locations available. "
+            "Opening it to check the detailed location."
+        )
+        open_job_candidate(page, candidate)
+
+        if page_is_blocked(page):
+            raise RuntimeError("Amazon returned a 403 / request-blocked page.")
+
+        detail_text = read_job_detail_text(page)
+        if text_matches_location(detail_text, desired_locations):
+            apply_button = find_apply_button(page)
+            if apply_button is None:
+                log.warning(
+                    "Detailed location matched, but no visible Apply button was found."
+                )
+            return {
+                "card_text": candidate.text,
+                "detail_text": detail_text,
+                "apply_visible": apply_button is not None,
+                "url": page.url,
+            }
+
+        log.info(
+            "Detailed location did not match this multiple-location card. "
+            "Returning to search results."
+        )
         return_to_job_search(page)
 
     return None
