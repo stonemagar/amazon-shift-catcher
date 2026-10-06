@@ -1,6 +1,7 @@
 import unittest
 
 from amazon_shift_catcher.job_search_browser import (
+    WAREHOUSE_TITLE_RE,
     normalise_location_terms,
     text_matches_location,
 )
@@ -25,6 +26,16 @@ class JobSearchMethodTests(unittest.TestCase):
         text = "Warehouse Associate Work address: Dartford, Kent DA1"
         self.assertTrue(text_matches_location(text, ["wembley", "DA1"]))
         self.assertFalse(text_matches_location(text, ["wembley", "croydon"]))
+
+    def test_warehouse_title_accepts_amazon_role_prefixes(self):
+        self.assertIsNotNone(WAREHOUSE_TITLE_RE.match("Warehouse Associate"))
+        self.assertIsNotNone(
+            WAREHOUSE_TITLE_RE.match("Delivery Station Warehouse Associate")
+        )
+        self.assertIsNotNone(
+            WAREHOUSE_TITLE_RE.match("Fulfillment Center Warehouse Associate")
+        )
+        self.assertIsNone(WAREHOUSE_TITLE_RE.match("Delivery Station Operative"))
 
 
 if __name__ == "__main__":
