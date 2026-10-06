@@ -1,11 +1,15 @@
+import tempfile
 import unittest
+from pathlib import Path
 
 from amazon_shift_catcher.job_search_browser import (
     WAREHOUSE_TITLE_RE,
     card_requires_detail_location_check,
+    extract_card_location,
     normalise_location_terms,
     text_matches_location,
 )
+from amazon_shift_catcher.location_storage import load_locations, save_unique_locations
 
 
 class JobSearchMethodTests(unittest.TestCase):
@@ -44,6 +48,50 @@ class JobSearchMethodTests(unittest.TestCase):
                 "Delivery Station Warehouse Associate Motherwell, Scotland"
             )
         )
+
+    def test_extract_card_location_uses_visible_location_line(self):
+        raw = (
+            "Delivery Station Warehouse Associate\n"
+            "Type: Part Time\n"
+            "Duration: Fixed-term\n"
+            "Pay rate: From £15.10\n"
+            "Motherwell, Scotland"
+        )
+        self.assertEqual(extract_card_location(raw), "Motherwell, Scotland")
+
+    def test_extract_card_location_skips_multiple_location_card(self):
+        raw = (
+            "Warehouse Associate\n"
+            "Type: Part Time\n"
+            "Multiple on site locations available"
+        )
+        self.assertIsNone(extract_card_location(raw))
+
+    def test_unique_location_storage_deduplicates_case_insensitively(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "locations.json"
+            first_added = save_unique_locations(
+                path,
+                ["Motherwell, Scotland", "Dundee, Scotland"],
+            )
+            second_added = save_unique_locations(
+                path,
+                ["motherwell, scotland", "Portadown, Northern Ireland"],
+            )
+
+            self.assertEqual(
+                first_added,
+                ["Motherwell, Scotland", "Dundee, Scotland"],
+            )
+            self.assertEqual(second_added, ["Portadown, Northern Ireland"])
+            self.assertEqual(
+                load_locations(path),
+                [
+                    "Motherwell, Scotland",
+                    "Dundee, Scotland",
+                    "Portadown, Northern Ireland",
+                ],
+            )
 
     def test_warehouse_title_accepts_amazon_role_prefixes(self):
         self.assertIsNotNone(WAREHOUSE_TITLE_RE.match("Warehouse Associate"))
