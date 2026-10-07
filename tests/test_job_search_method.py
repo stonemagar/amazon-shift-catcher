@@ -10,6 +10,10 @@ from amazon_shift_catcher.job_search_browser import (
     normalise_location_terms,
     text_matches_location,
 )
+from amazon_shift_catcher.job_search_shifts import (
+    evaluate_shift_opportunity,
+    parse_shift_opportunity,
+)
 from amazon_shift_catcher.location_storage import load_locations, save_unique_locations
 
 
@@ -141,6 +145,49 @@ class JobSearchMethodTests(unittest.TestCase):
             detect_application_stage(real_shift_page),
             "SHIFT_SELECTION",
         )
+
+    def test_parse_method2_shift_card(self):
+        raw = (
+            "Start Date: Monday, 16 Oct 2026\n"
+            "End Date: Saturday, 16 Jan 2027\n"
+            "Shift: Wed, Thu, Fri 9:00 AM - 1:00 PM\n"
+            "Pay rate: £15.10/hr\n"
+            "Hours: 12 hours per week\n"
+            "Location: Motherwell, Scotland"
+        )
+        opportunity = parse_shift_opportunity(raw)
+        self.assertEqual(opportunity.location, "Motherwell, Scotland")
+        self.assertEqual(opportunity.hours_per_week, 12)
+        self.assertEqual(opportunity.start_time, "09:00")
+        self.assertEqual(opportunity.end_time, "13:00")
+        self.assertEqual(opportunity.days, ["Wednesday", "Thursday", "Friday"])
+
+    def test_method2_shift_uses_existing_rules_and_location(self):
+        opportunity = parse_shift_opportunity(
+            "Start Date: 16 Oct 2026\n"
+            "End Date: 16 Jan 2027\n"
+            "Shift: Wed, Thu, Fri 9:00 AM - 1:00 PM\n"
+            "Pay rate: £15.10/hr\n"
+            "Hours: 12 hours per week\n"
+            "Location: Motherwell, Scotland"
+        )
+        rules = {
+            "max_hours_per_week": 20,
+            "allowed_days": ["Wednesday", "Thursday", "Friday", "Saturday", "Sunday"],
+            "blocked_days": ["Monday", "Tuesday"],
+            "allow_night_shift": False,
+            "earliest_start_time": "09:00",
+            "latest_end_time": "13:00",
+            "preferred_hours_order": [20, 12, 8],
+        }
+        matched, reasons, score = evaluate_shift_opportunity(
+            opportunity,
+            rules,
+            ["Motherwell"],
+        )
+        self.assertTrue(matched)
+        self.assertEqual(reasons, [])
+        self.assertGreater(score, 0)
 
     def test_warehouse_title_accepts_amazon_role_prefixes(self):
         self.assertIsNotNone(WAREHOUSE_TITLE_RE.match("Warehouse Associate"))
