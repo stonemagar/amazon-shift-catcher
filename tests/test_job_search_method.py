@@ -5,6 +5,7 @@ from pathlib import Path
 from amazon_shift_catcher.job_search_browser import (
     WAREHOUSE_TITLE_RE,
     card_requires_detail_location_check,
+    detect_application_stage,
     extract_card_location,
     normalise_location_terms,
     text_matches_location,
@@ -92,6 +93,28 @@ class JobSearchMethodTests(unittest.TestCase):
                     "Portadown, Northern Ireland",
                 ],
             )
+
+    def test_application_stage_detects_shift_selection(self):
+        class DummyLocator:
+            def __init__(self, text):
+                self.text = text
+            def inner_text(self, timeout=3000):
+                return self.text
+            def count(self):
+                return 0
+
+        class DummyPage:
+            def locator(self, selector):
+                return DummyLocator(
+                    "Start date End date Shift Pay rate Hours Location"
+                )
+            def get_by_role(self, *args, **kwargs):
+                return DummyLocator("")
+
+        self.assertEqual(
+            detect_application_stage(DummyPage()),
+            "SHIFT_SELECTION",
+        )
 
     def test_warehouse_title_accepts_amazon_role_prefixes(self):
         self.assertIsNotNone(WAREHOUSE_TITLE_RE.match("Warehouse Associate"))
