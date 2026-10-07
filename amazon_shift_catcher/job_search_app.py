@@ -239,6 +239,11 @@ def run() -> None:
     setup_logging()
     log = logging.getLogger("job-search-catcher")
 
+    # Create the local location store immediately so it is easy to find even
+    # before the first new location is discovered.
+    save_unique_locations(LOCATION_STORE, [])
+    log.info("Location storage file=%s", LOCATION_STORE)
+
     interval = max(3, int(config.get("check_interval_seconds", 10)))
     timeout_ms = int(config.get("navigation_timeout_seconds", 30)) * 1000
     cdp_url = os.getenv("BRAVE_CDP_URL", "http://127.0.0.1:9222").strip()
