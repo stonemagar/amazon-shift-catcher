@@ -252,13 +252,28 @@ def find_continue_button(page: Page):
 
 
 def shift_selection_page_visible(page: Page) -> bool:
-    """Detect the shift-card page described in the Method 2 document."""
+    """Detect the actual shift-selection page, not a normal job-details page."""
     try:
         body = page.locator("body").inner_text(timeout=3000)
     except Exception:
         return False
 
     compact = " ".join(body.split())
+
+    # Job-details pages can also contain words such as Start date, Shift,
+    # Pay rate, Hours and Location. Require a shift-selection-specific signal too.
+    strong_signal = bool(
+        re.search(
+            r"(Select\s+(?:a|your|work)\s+shift|"
+            r"Choose\s+(?:a|your|work)\s+shift|"
+            r"Showing\s+\d+\s+of\s+\d+\s+shifts?)",
+            compact,
+            re.I,
+        )
+    )
+    if not strong_signal:
+        return False
+
     markers = [
         r"\bStart date\b",
         r"\bEnd date\b",
@@ -267,13 +282,16 @@ def shift_selection_page_visible(page: Page) -> bool:
         r"\bHours\b",
         r"\bLocation\b",
     ]
-    return sum(bool(re.search(marker, compact, re.I)) for marker in markers) >= 4
+    return sum(bool(re.search(marker, compact, re.I)) for marker in markers) >= 3
 
 
 def detect_application_stage(page: Page) -> str:
     """Identify the next user-controlled step after a matching job is opened."""
-    if shift_selection_page_visible(page):
-        return "SHIFT_SELECTION"
+    if page_has_security_challenge(page):
+        return "SECURITY_CHECK"
+
+    # Prefer visible action buttons over generic page text. This prevents the
+    # job-details page from being mistaken for shift selection.
     if find_continue_button(page) is not None:
         return "CONTINUE"
     if find_start_application_button(page) is not None:
@@ -282,8 +300,8 @@ def detect_application_stage(page: Page) -> str:
         return "NEXT"
     if find_apply_button(page) is not None:
         return "APPLY"
-    if page_has_security_challenge(page):
-        return "SECURITY_CHECK"
+    if shift_selection_page_visible(page):
+        return "SHIFT_SELECTION"
     return "UNKNOWN"
 
 
