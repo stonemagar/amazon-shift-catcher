@@ -26,7 +26,12 @@ from .job_search_browser import (
     text_matches_location,
     wait_for_manual_login,
 )
-from .job_search_shifts import evaluate_shift_opportunity, read_shift_opportunities
+from .job_search_shifts import (
+    apply_time_preference,
+    evaluate_shift_opportunity,
+    normalise_user_time,
+    read_shift_opportunities,
+)
 from .location_storage import save_unique_locations
 from .notifier import send_notification
 
@@ -91,6 +96,56 @@ def choose_desired_locations() -> list[str]:
         print("Monitoring location: ANY")
 
     return selected
+
+
+
+def choose_time_preference(base_rules: dict) -> dict:
+    """Ask how the user wants Method 2 to interpret shift time."""
+    print("\n" + "=" * 64)
+    print("SHIFT TIME PREFERENCE")
+    print("1 = Any time")
+    print("2 = Day shift   (starts 06:00-17:59 and does not cross midnight)")
+    print("3 = Night shift (starts 18:00-05:59 or crosses midnight)")
+    print("4 = Specific time window")
+    print("=" * 64)
+
+    while True:
+        choice = input("Select time preference [1-4]: ").strip()
+
+        if choice == "1":
+            print("Time preference: ANY")
+            return apply_time_preference(base_rules, "any")
+
+        if choice == "2":
+            print("Time preference: DAY SHIFT")
+            return apply_time_preference(base_rules, "day")
+
+        if choice == "3":
+            print("Time preference: NIGHT SHIFT")
+            return apply_time_preference(base_rules, "night")
+
+        if choice == "4":
+            while True:
+                earliest_raw = input("Earliest start time (HH:MM): ").strip()
+                latest_raw = input("Latest end time (HH:MM): ").strip()
+                earliest = normalise_user_time(earliest_raw)
+                latest = normalise_user_time(latest_raw)
+
+                if earliest and latest:
+                    print(
+                        "Time preference: SPECIFIC WINDOW "
+                        f"{earliest} - {latest}"
+                    )
+                    return apply_time_preference(
+                        base_rules,
+                        "window",
+                        earliest_start=earliest,
+                        latest_end=latest,
+                    )
+
+                print("Invalid time. Example: 09:00, 13:30, 9 AM, 10:30 PM.")
+
+        print("Please enter 1, 2, 3, or 4.")
 
 
 def _choose_amazon_page(browser, fallback_url: str):
@@ -416,6 +471,7 @@ def run() -> None:
     load_dotenv(ROOT / ".env")
     config = load_config()
     desired_locations = choose_desired_locations()
+    runtime_rules = choose_time_preference(config.get("rules", {}))
 
     setup_logging()
     log = logging.getLogger("job-search-catcher")
@@ -439,6 +495,7 @@ def run() -> None:
         "Desired locations=%s",
         ", ".join(desired_locations) if desired_locations else "ANY",
     )
+    log.info("Runtime time preference=%s", runtime_rules.get("time_preference"))
     log.info("Connecting to existing Brave session at %s", cdp_url)
 
     with sync_playwright() as playwright:
@@ -531,7 +588,7 @@ def run() -> None:
                         state = JobSearchState.SHIFT_REVIEW
                         review_shift_opportunities(
                             page,
-                            config.get("rules", {}),
+                            runtime_rules,
                             desired_locations,
                             log,
                         )
