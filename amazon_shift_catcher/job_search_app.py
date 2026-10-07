@@ -26,6 +26,7 @@ from .job_search_browser import (
     text_matches_location,
     wait_for_manual_login,
 )
+from .job_search_shifts import evaluate_shift_opportunity, read_shift_opportunities
 from .location_storage import save_unique_locations
 from .notifier import send_notification
 
@@ -43,6 +44,7 @@ class JobSearchState(str, Enum):
     JOB_FOUND = "JOB_FOUND"
     APPLICATION_GUIDE = "APPLICATION_GUIDE"
     SHIFT_SELECTION = "SHIFT_SELECTION"
+    SHIFT_REVIEW = "SHIFT_REVIEW"
     SECURITY_CHECK = "SECURITY_CHECK"
     BLOCKED = "BLOCKED"
     ERROR = "ERROR"
@@ -335,6 +337,81 @@ def advance_to_shift_selection(page, log):
     return None
 
 
+def review_shift_opportunities(
+    page,
+    rules: dict,
+    desired_locations: list[str],
+    log,
+):
+    """Read and evaluate visible shift cards without selecting any shift."""
+    opportunities = read_shift_opportunities(page)
+
+    if not opportunities:
+        log.warning("Shift-selection page detected, but no readable shift cards were found.")
+        print("No readable shift cards found yet.")
+        return []
+
+    log.info("Found %s visible shift card(s).", len(opportunities))
+    evaluated = []
+
+    for opportunity in opportunities:
+        is_match, reasons, score = evaluate_shift_opportunity(
+            opportunity,
+            rules,
+            desired_locations,
+        )
+        evaluated.append((opportunity, is_match, reasons, score))
+
+        status = "MATCH" if is_match else "NO MATCH"
+        log.info(
+            "Shift %s | %s | start=%s | end=%s | shift=%s | pay=%s | "
+            "hours=%s | location=%s | score=%s | reasons=%s",
+            opportunity.index + 1,
+            status,
+            opportunity.start_date or "?",
+            opportunity.end_date or "?",
+            opportunity.shift or "?",
+            opportunity.pay_rate or "?",
+            opportunity.hours or "?",
+            opportunity.location or "?",
+            score,
+            "; ".join(reasons) if reasons else "none",
+        )
+
+    matching = [item for item in evaluated if item[1]]
+    matching.sort(key=lambda item: item[3], reverse=True)
+
+    print("\nSHIFT REVIEW")
+    print(f"Visible shift cards: {len(evaluated)}")
+    print(f"Matching shift cards: {len(matching)}")
+
+    for opportunity, is_match, reasons, score in evaluated:
+        print(
+            f"#{opportunity.index + 1} "
+            f"{'MATCH' if is_match else 'NO MATCH'} | "
+            f"Start: {opportunity.start_date or '?'} | "
+            f"End: {opportunity.end_date or '?'} | "
+            f"Shift: {opportunity.shift or '?'} | "
+            f"Hours: {opportunity.hours or '?'} | "
+            f"Location: {opportunity.location or '?'}"
+        )
+        if reasons:
+            print("  Reasons: " + "; ".join(reasons))
+
+    if matching:
+        best = matching[0][0]
+        print(
+            "\nBest matching visible shift: "
+            f"#{best.index + 1} | "
+            f"{best.shift or '?'} | {best.hours or '?'} | {best.location or '?'}"
+        )
+        print("No shift has been selected automatically.")
+    else:
+        print("\nNo visible shift currently matches all configured rules.")
+
+    return evaluated
+
+
 def run() -> None:
     load_dotenv(ROOT / ".env")
     config = load_config()
@@ -450,13 +527,23 @@ def run() -> None:
                         page = application_page
                         state = JobSearchState.SHIFT_SELECTION
                         _save_screenshot(page, "job-search-shift-selection", log)
+
+                        state = JobSearchState.SHIFT_REVIEW
+                        review_shift_opportunities(
+                            page,
+                            config.get("rules", {}),
+                            desired_locations,
+                            log,
+                        )
+
                         _notify(
-                            "Amazon shift-selection page reached. "
-                            "Automation has stopped before selecting a shift.",
-                            title="AMAZON SHIFT PAGE REACHED",
+                            "Amazon shift-selection page reached and visible shift cards "
+                            "were reviewed against your configured rules. "
+                            "No shift was selected automatically.",
+                            title="AMAZON SHIFT REVIEW COMPLETE",
                             priority=5,
                         )
-                        stop_reason = "shift-selection page reached"
+                        stop_reason = "shift review complete"
                     else:
                         stop_reason = "application flow stopped"
                     break
