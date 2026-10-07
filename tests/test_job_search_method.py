@@ -11,7 +11,9 @@ from amazon_shift_catcher.job_search_browser import (
     text_matches_location,
 )
 from amazon_shift_catcher.job_search_shifts import (
+    apply_time_preference,
     evaluate_shift_opportunity,
+    normalise_user_time,
     parse_shift_opportunity,
 )
 from amazon_shift_catcher.location_storage import load_locations, save_unique_locations
@@ -189,6 +191,82 @@ class JobSearchMethodTests(unittest.TestCase):
         self.assertEqual(reasons, [])
         self.assertGreater(score, 0)
 
+    def test_method2_time_preference_modes(self):
+        day_shift = parse_shift_opportunity(
+            "Shift: Thu, Fri 9:30 - 14:30\n"
+            "Hours: 20hrs per week\n"
+            "Location: Motherwell"
+        )
+        overnight_shift = parse_shift_opportunity(
+            "Shift: Fri, Sat 20:00 - 04:00\n"
+            "Hours: 20hrs per week\n"
+            "Location: Motherwell"
+        )
+        base = {
+            "max_hours_per_week": 20,
+            "allowed_days": ["Thursday", "Friday", "Saturday"],
+            "blocked_days": [],
+            "preferred_hours_order": [20],
+            "earliest_start_time": "09:00",
+            "latest_end_time": "13:00",
+            "allow_night_shift": False,
+        }
+
+        any_rules = apply_time_preference(base, "any")
+        self.assertTrue(
+            evaluate_shift_opportunity(day_shift, any_rules, ["Motherwell"])[0]
+        )
+        self.assertTrue(
+            evaluate_shift_opportunity(overnight_shift, any_rules, ["Motherwell"])[0]
+        )
+
+        day_rules = apply_time_preference(base, "day")
+        self.assertTrue(
+            evaluate_shift_opportunity(day_shift, day_rules, ["Motherwell"])[0]
+        )
+        self.assertFalse(
+            evaluate_shift_opportunity(overnight_shift, day_rules, ["Motherwell"])[0]
+        )
+
+        night_rules = apply_time_preference(base, "night")
+        self.assertFalse(
+            evaluate_shift_opportunity(day_shift, night_rules, ["Motherwell"])[0]
+        )
+        self.assertTrue(
+            evaluate_shift_opportunity(overnight_shift, night_rules, ["Motherwell"])[0]
+        )
+
+    def test_method2_specific_time_window_supports_overnight(self):
+        overnight_shift = parse_shift_opportunity(
+            "Shift: Fri, Sat 22:00 - 04:00\n"
+            "Hours: 20hrs per week\n"
+            "Location: Motherwell"
+        )
+        rules = apply_time_preference(
+            {
+                "max_hours_per_week": 20,
+                "allowed_days": ["Friday", "Saturday"],
+                "blocked_days": [],
+                "preferred_hours_order": [20],
+            },
+            "window",
+            earliest_start="20:00",
+            latest_end="06:00",
+        )
+        matched, reasons, _score = evaluate_shift_opportunity(
+            overnight_shift,
+            rules,
+            ["Motherwell"],
+        )
+        self.assertTrue(matched)
+        self.assertEqual(reasons, [])
+
+    def test_normalise_user_time(self):
+        self.assertEqual(normalise_user_time("9 AM"), "09:00")
+        self.assertEqual(normalise_user_time("10:30 PM"), "22:30")
+        self.assertEqual(normalise_user_time("13:45"), "13:45")
+        self.assertIsNone(normalise_user_time("not-a-time"))
+
     def test_method2_overnight_shift_is_rejected_correctly(self):
         opportunity = parse_shift_opportunity(
             "Start Date: 23 Oct 2026\n"
@@ -198,23 +276,22 @@ class JobSearchMethodTests(unittest.TestCase):
             "Hours: 20hrs per week\n"
             "Location: Motherwell, Scotland"
         )
-        rules = {
-            "max_hours_per_week": 20,
-            "allowed_days": ["Friday", "Saturday", "Sunday"],
-            "blocked_days": [],
-            "allow_night_shift": False,
-            "earliest_start_time": "09:00",
-            "latest_end_time": "13:00",
-            "preferred_hours_order": [20],
-        }
+        rules = apply_time_preference(
+            {
+                "max_hours_per_week": 20,
+                "allowed_days": ["Friday", "Saturday", "Sunday"],
+                "blocked_days": [],
+                "preferred_hours_order": [20],
+            },
+            "day",
+        )
         matched, reasons, _score = evaluate_shift_opportunity(
             opportunity,
             rules,
             ["Motherwell"],
         )
         self.assertFalse(matched)
-        self.assertIn("overnight shift is not allowed", reasons)
-        self.assertIn("ends after 13:00 (next day)", reasons)
+        self.assertIn("not a day shift", reasons)
 
     def test_warehouse_title_accepts_amazon_role_prefixes(self):
         self.assertIsNotNone(WAREHOUSE_TITLE_RE.match("Warehouse Associate"))
