@@ -12,6 +12,7 @@ from playwright.sync_api import sync_playwright
 from .alarm import start_alarm, stop_alarm
 from .job_search_browser import (
     card_requires_detail_location_check,
+    click_application_stage,
     detect_application_stage,
     find_apply_button,
     normalise_location_terms,
@@ -234,44 +235,53 @@ def find_desired_job(page, desired_locations: list[str], log):
     return None
 
 
-def guide_user_to_shift_selection(page, log) -> bool:
-    """Watch the application flow while the user performs the clicks manually."""
-    last_stage = None
+def advance_to_shift_selection(page, log) -> bool:
+    """Automatically follow Apply -> Next -> Start Application -> optional Continue.
 
-    print("\nMANUAL APPLICATION FLOW")
-    print("Complete the next Amazon button shown in Brave.")
-    print("The catcher will detect each page change and guide you.")
-    print("It will stop automatically when the shift-selection page is reached.\n")
+    Security, OTP, CAPTCHA, identity and other verification steps remain manual.
+    """
+    expected_order = ["APPLY", "NEXT", "START_APPLICATION", "CONTINUE"]
+    last_stage = None
+    idle_started = time.monotonic()
+
+    print("\nAUTOMATIC APPLICATION FLOW")
+    print("Following: Apply -> Next -> Start Application -> optional Continue")
+    print("Security/verification steps will NOT be bypassed.\n")
 
     while not page.is_closed():
         if page_is_blocked(page):
             raise RuntimeError("Amazon returned a 403 / request-blocked page.")
 
         stage = detect_application_stage(page)
+
         if stage != last_stage:
             last_stage = stage
+            idle_started = time.monotonic()
             log.info("Application stage detected: %s", stage)
 
-            if stage == "APPLY":
-                print("Next action in Brave: click Apply")
-            elif stage == "NEXT":
-                print("Next action in Brave: click Next")
-            elif stage == "START_APPLICATION":
-                print("Next action in Brave: click Start Application")
-            elif stage == "CONTINUE":
-                print("Next action in Brave: click Continue")
-            elif stage == "SECURITY_CHECK":
-                print("Amazon security/verification step detected. Complete it manually.")
-            elif stage == "SHIFT_SELECTION":
-                print("Shift-selection page reached.")
-                return True
-            elif stage == "UNKNOWN":
-                print(
-                    "Waiting for the next known Amazon application page. "
-                    "If Amazon is still loading, wait a moment."
-                )
+        if stage == "SHIFT_SELECTION":
+            log.info("Shift-selection page reached.")
+            return True
 
-        page.wait_for_timeout(500)
+        if stage == "SECURITY_CHECK":
+            raise RuntimeError(
+                "Amazon security/verification step detected. "
+                "Complete it manually, then run the catcher again."
+            )
+
+        if stage in expected_order:
+            log.info("Automatically clicking %s.", stage)
+            if not click_application_stage(page, stage):
+                raise RuntimeError(f"Could not click expected application stage: {stage}")
+            continue
+
+        if stage == "UNKNOWN" and time.monotonic() - idle_started > 15:
+            raise RuntimeError(
+                "Application flow reached an unknown page and did not advance "
+                "for 15 seconds."
+            )
+
+        page.wait_for_timeout(400)
 
     return False
 
@@ -378,15 +388,15 @@ def run() -> None:
                         "Matching Warehouse Associate job found.\n"
                         f"Location target: {location_label}\n"
                         f"{apply_status}\n\n"
-                        "The catcher will now guide the manual application steps "
-                        "until the shift-selection page is reached.",
+                        "The catcher will now follow Apply -> Next -> Start Application "
+                        "-> optional Continue automatically.",
                         title="AMAZON JOB FOUND",
                         priority=5,
                     )
                     print("\nMATCHING WAREHOUSE ASSOCIATE JOB FOUND.")
                     state = JobSearchState.APPLICATION_GUIDE
 
-                    reached_shift_page = guide_user_to_shift_selection(page, log)
+                    reached_shift_page = advance_to_shift_selection(page, log)
                     if reached_shift_page:
                         state = JobSearchState.SHIFT_SELECTION
                         _save_screenshot(page, "job-search-shift-selection", log)
@@ -398,7 +408,7 @@ def run() -> None:
                         )
                         stop_reason = "shift-selection page reached"
                     else:
-                        stop_reason = "application guide stopped"
+                        stop_reason = "application flow stopped"
                     break
 
                 state = JobSearchState.JOB_SEARCH
