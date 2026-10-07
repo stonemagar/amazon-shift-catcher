@@ -189,6 +189,33 @@ class JobSearchMethodTests(unittest.TestCase):
         self.assertEqual(reasons, [])
         self.assertGreater(score, 0)
 
+    def test_method2_overnight_shift_is_rejected_correctly(self):
+        opportunity = parse_shift_opportunity(
+            "Start Date: 23 Oct 2026\n"
+            "End Date: 16 Jan 2027\n"
+            "Shift: Fri, Sat, Sun 15:30 - 0:00\n"
+            "Pay rate: £15.10/hr\n"
+            "Hours: 20hrs per week\n"
+            "Location: Motherwell, Scotland"
+        )
+        rules = {
+            "max_hours_per_week": 20,
+            "allowed_days": ["Friday", "Saturday", "Sunday"],
+            "blocked_days": [],
+            "allow_night_shift": False,
+            "earliest_start_time": "09:00",
+            "latest_end_time": "13:00",
+            "preferred_hours_order": [20],
+        }
+        matched, reasons, _score = evaluate_shift_opportunity(
+            opportunity,
+            rules,
+            ["Motherwell"],
+        )
+        self.assertFalse(matched)
+        self.assertIn("overnight shift is not allowed", reasons)
+        self.assertIn("ends after 13:00 (next day)", reasons)
+
     def test_warehouse_title_accepts_amazon_role_prefixes(self):
         self.assertIsNotNone(WAREHOUSE_TITLE_RE.match("Warehouse Associate"))
         self.assertIsNotNone(
