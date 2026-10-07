@@ -253,11 +253,11 @@ def find_continue_button(page: Page):
 
 
 def click_application_stage(page: Page, stage: str) -> Page | None:
-    """Click one Method 2 action and return the page that should be controlled next.
+    """Click one Method 2 action exactly once and return the page to control next.
 
-    Amazon currently opens the application flow in a new tab after Apply. Detect
-    that handoff and switch automation to the new tab instead of clicking Apply
-    repeatedly on the original job-details tab.
+    Amazon may open a new tab for an application step. We switch to that tab once,
+    but the caller is responsible for never re-clicking the same stage until the
+    application state changes.
     """
     button = None
 
@@ -277,10 +277,11 @@ def click_application_stage(page: Page, stage: str) -> Page | None:
 
     context = page.context
     existing_pages = list(context.pages)
+    previous_url = page.url
 
     button.click(timeout=7000)
 
-    # Give Amazon a short window to create a new application tab.
+    # Give Amazon time either to navigate this tab or open one new application tab.
     deadline = time.monotonic() + 5
     next_page = page
 
@@ -294,9 +295,11 @@ def click_application_stage(page: Page, stage: str) -> Page | None:
             next_page = new_pages[-1]
             break
 
-        # If the current tab navigated instead, keep using it.
         try:
             if page.is_closed():
+                break
+            if page.url != previous_url:
+                next_page = page
                 break
         except Exception:
             break
@@ -314,9 +317,19 @@ def click_application_stage(page: Page, stage: str) -> Page | None:
         pass
 
     try:
-        next_page.wait_for_timeout(700)
+        next_page.wait_for_timeout(900)
     except Exception:
         pass
+
+    # If an application step replaced an older application tab with a new one,
+    # close only the superseded application tab. Keep the original job-details tab.
+    if next_page is not page:
+        try:
+            old_url = page.url.lower()
+            if "/application/uk/" in old_url:
+                page.close()
+        except Exception:
+            pass
 
     return next_page
 
