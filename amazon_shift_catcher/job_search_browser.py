@@ -252,6 +252,25 @@ def find_continue_button(page: Page):
     return _find_visible_button(page, CONTINUE_RE)
 
 
+def find_open_application_tab(page: Page):
+    """Return the newest open Amazon application tab in this browser context."""
+    try:
+        pages = list(page.context.pages)
+    except Exception:
+        return None
+
+    for candidate in reversed(pages):
+        try:
+            if candidate.is_closed():
+                continue
+            if "/application/uk/" in candidate.url.lower():
+                return candidate
+        except Exception:
+            continue
+
+    return None
+
+
 def click_application_stage(page: Page, stage: str) -> Page | None:
     """Click one Method 2 action exactly once and return the page to control next.
 
@@ -281,18 +300,29 @@ def click_application_stage(page: Page, stage: str) -> Page | None:
 
     button.click(timeout=7000)
 
-    # Give Amazon time either to navigate this tab or open one new application tab.
-    deadline = time.monotonic() + 5
+    # Return as soon as Amazon creates the next tab. Do not wait several more
+    # seconds for DOMContentLoaded here; the main state loop can wait for the next
+    # button while the new page finishes rendering.
+    deadline = time.monotonic() + 3
     next_page = page
 
     while time.monotonic() < deadline:
-        new_pages = [
-            candidate
-            for candidate in context.pages
-            if candidate not in existing_pages and not candidate.is_closed()
-        ]
+        try:
+            new_pages = [
+                candidate
+                for candidate in context.pages
+                if candidate not in existing_pages and not candidate.is_closed()
+            ]
+        except Exception:
+            new_pages = []
+
         if new_pages:
             next_page = new_pages[-1]
+            break
+
+        application_tab = find_open_application_tab(page)
+        if application_tab is not None and application_tab is not page:
+            next_page = application_tab
             break
 
         try:
@@ -304,20 +334,10 @@ def click_application_stage(page: Page, stage: str) -> Page | None:
         except Exception:
             break
 
-        time.sleep(0.1)
+        time.sleep(0.05)
 
     try:
         next_page.bring_to_front()
-    except Exception:
-        pass
-
-    try:
-        next_page.wait_for_load_state("domcontentloaded", timeout=8000)
-    except Exception:
-        pass
-
-    try:
-        next_page.wait_for_timeout(900)
     except Exception:
         pass
 
