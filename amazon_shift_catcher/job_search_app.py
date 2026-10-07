@@ -235,7 +235,7 @@ def find_desired_job(page, desired_locations: list[str], log):
     return None
 
 
-def advance_to_shift_selection(page, log) -> bool:
+def advance_to_shift_selection(page, log):
     """Automatically follow Apply -> Next -> Start Application -> optional Continue.
 
     Security, OTP, CAPTCHA, identity and other verification steps remain manual.
@@ -261,7 +261,7 @@ def advance_to_shift_selection(page, log) -> bool:
 
         if stage == "SHIFT_SELECTION":
             log.info("Shift-selection page reached.")
-            return True
+            return page
 
         if stage == "SECURITY_CHECK":
             raise RuntimeError(
@@ -271,8 +271,17 @@ def advance_to_shift_selection(page, log) -> bool:
 
         if stage in expected_order:
             log.info("Automatically clicking %s.", stage)
-            if not click_application_stage(page, stage):
+            next_page = click_application_stage(page, stage)
+            if next_page is None:
                 raise RuntimeError(f"Could not click expected application stage: {stage}")
+
+            if next_page is not page:
+                log.info(
+                    "Application flow opened a new tab. Switching control to: %s",
+                    next_page.url,
+                )
+                page = next_page
+
             continue
 
         if stage == "UNKNOWN" and time.monotonic() - idle_started > 15:
@@ -283,7 +292,7 @@ def advance_to_shift_selection(page, log) -> bool:
 
         page.wait_for_timeout(400)
 
-    return False
+    return None
 
 
 def run() -> None:
@@ -396,8 +405,9 @@ def run() -> None:
                     print("\nMATCHING WAREHOUSE ASSOCIATE JOB FOUND.")
                     state = JobSearchState.APPLICATION_GUIDE
 
-                    reached_shift_page = advance_to_shift_selection(page, log)
-                    if reached_shift_page:
+                    application_page = advance_to_shift_selection(page, log)
+                    if application_page is not None:
+                        page = application_page
                         state = JobSearchState.SHIFT_SELECTION
                         _save_screenshot(page, "job-search-shift-selection", log)
                         _notify(
