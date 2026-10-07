@@ -12,6 +12,7 @@ from playwright.sync_api import sync_playwright
 from .alarm import start_alarm, stop_alarm
 from .job_search_browser import (
     card_requires_detail_location_check,
+    detect_application_stage,
     find_apply_button,
     normalise_location_terms,
     open_job_candidate,
@@ -38,6 +39,8 @@ class JobSearchState(str, Enum):
     JOB_SEARCH = "JOB_SEARCH"
     CHECKING_JOB = "CHECKING_JOB"
     JOB_FOUND = "JOB_FOUND"
+    APPLICATION_GUIDE = "APPLICATION_GUIDE"
+    SHIFT_SELECTION = "SHIFT_SELECTION"
     SECURITY_CHECK = "SECURITY_CHECK"
     BLOCKED = "BLOCKED"
     ERROR = "ERROR"
@@ -231,6 +234,48 @@ def find_desired_job(page, desired_locations: list[str], log):
     return None
 
 
+def guide_user_to_shift_selection(page, log) -> bool:
+    """Watch the application flow while the user performs the clicks manually."""
+    last_stage = None
+
+    print("\nMANUAL APPLICATION FLOW")
+    print("Complete the next Amazon button shown in Brave.")
+    print("The catcher will detect each page change and guide you.")
+    print("It will stop automatically when the shift-selection page is reached.\n")
+
+    while not page.is_closed():
+        if page_is_blocked(page):
+            raise RuntimeError("Amazon returned a 403 / request-blocked page.")
+
+        stage = detect_application_stage(page)
+        if stage != last_stage:
+            last_stage = stage
+            log.info("Application stage detected: %s", stage)
+
+            if stage == "APPLY":
+                print("Next action in Brave: click Apply")
+            elif stage == "NEXT":
+                print("Next action in Brave: click Next")
+            elif stage == "START_APPLICATION":
+                print("Next action in Brave: click Start Application")
+            elif stage == "CONTINUE":
+                print("Next action in Brave: click Continue")
+            elif stage == "SECURITY_CHECK":
+                print("Amazon security/verification step detected. Complete it manually.")
+            elif stage == "SHIFT_SELECTION":
+                print("Shift-selection page reached.")
+                return True
+            elif stage == "UNKNOWN":
+                print(
+                    "Waiting for the next known Amazon application page. "
+                    "If Amazon is still loading, wait a moment."
+                )
+
+        page.wait_for_timeout(500)
+
+    return False
+
+
 def run() -> None:
     load_dotenv(ROOT / ".env")
     config = load_config()
@@ -333,15 +378,27 @@ def run() -> None:
                         "Matching Warehouse Associate job found.\n"
                         f"Location target: {location_label}\n"
                         f"{apply_status}\n\n"
-                        "Monitoring has stopped on the job-details page. "
-                        "This first implementation does NOT click Apply automatically.",
+                        "The catcher will now guide the manual application steps "
+                        "until the shift-selection page is reached.",
                         title="AMAZON JOB FOUND",
                         priority=5,
                     )
                     print("\nMATCHING WAREHOUSE ASSOCIATE JOB FOUND.")
-                    print("Monitoring stopped on the job-details page.")
-                    print("Apply has NOT been clicked automatically.")
-                    stop_reason = "matching job found"
+                    state = JobSearchState.APPLICATION_GUIDE
+
+                    reached_shift_page = guide_user_to_shift_selection(page, log)
+                    if reached_shift_page:
+                        state = JobSearchState.SHIFT_SELECTION
+                        _save_screenshot(page, "job-search-shift-selection", log)
+                        _notify(
+                            "Amazon shift-selection page reached. "
+                            "Automation has stopped before selecting a shift.",
+                            title="AMAZON SHIFT PAGE REACHED",
+                            priority=5,
+                        )
+                        stop_reason = "shift-selection page reached"
+                    else:
+                        stop_reason = "application guide stopped"
                     break
 
                 state = JobSearchState.JOB_SEARCH
