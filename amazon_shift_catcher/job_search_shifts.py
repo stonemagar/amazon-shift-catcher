@@ -40,7 +40,7 @@ def _compact(value: str) -> str:
     return " ".join(value.split()).strip()
 
 
-def _normalise_time(value: str) -> Optional[str]:
+def normalise_user_time(value: str) -> Optional[str]:
     value = value.strip().upper().replace(".", "")
     for fmt in ("%I:%M %p", "%I %p", "%H:%M"):
         try:
@@ -123,7 +123,7 @@ def _parse_time_range(text: str) -> tuple[Optional[str], Optional[str]]:
     for pattern in patterns:
         match = re.search(pattern, text, re.I)
         if match:
-            return _normalise_time(match.group(1)), _normalise_time(match.group(2))
+            return normalise_user_time(match.group(1)), normalise_user_time(match.group(2))
     return None, None
 
 
@@ -228,6 +228,97 @@ def read_shift_opportunities(page: Page) -> list[ShiftOpportunity]:
     return opportunities
 
 
+
+def _time_to_minutes(value: Optional[str]) -> Optional[int]:
+    if not value:
+        return None
+    try:
+        hours, minutes = value.split(":", 1)
+        return int(hours) * 60 + int(minutes)
+    except (ValueError, AttributeError):
+        return None
+
+
+def _shift_crosses_midnight(opportunity: ShiftOpportunity) -> bool:
+    start = _time_to_minutes(opportunity.start_time)
+    end = _time_to_minutes(opportunity.end_time)
+    return start is not None and end is not None and end <= start
+
+
+def _matches_time_preference(
+    opportunity: ShiftOpportunity,
+    preference: dict,
+) -> tuple[bool, Optional[str]]:
+    mode = (preference.get("mode") or "any").strip().lower()
+
+    if mode == "any":
+        return True, None
+
+    start = _time_to_minutes(opportunity.start_time)
+    end = _time_to_minutes(opportunity.end_time)
+    if start is None or end is None:
+        return False, "shift time could not be read"
+
+    crosses_midnight = end <= start
+
+    if mode == "day":
+        if 6 * 60 <= start < 18 * 60 and not crosses_midnight:
+            return True, None
+        return False, "not a day shift"
+
+    if mode == "night":
+        if start >= 18 * 60 or start < 6 * 60 or crosses_midnight:
+            return True, None
+        return False, "not a night shift"
+
+    if mode == "window":
+        earliest = _time_to_minutes(preference.get("earliest_start"))
+        latest = _time_to_minutes(preference.get("latest_end"))
+        if earliest is None or latest is None:
+            return False, "specific time window is incomplete"
+
+        shift_start = start
+        shift_end = end + (24 * 60 if crosses_midnight else 0)
+        window_end = latest + (24 * 60 if latest <= earliest else 0)
+
+        # For an overnight window such as 20:00-06:00, early-morning starts
+        # belong to the next-day portion of the requested window.
+        if latest <= earliest and shift_start < earliest:
+            shift_start += 24 * 60
+            shift_end += 24 * 60
+
+        if shift_start < earliest:
+            return False, f"starts before requested window {preference['earliest_start']}"
+        if shift_end > window_end:
+            return False, f"ends after requested window {preference['latest_end']}"
+        return True, None
+
+    return False, f"unknown time preference mode: {mode}"
+
+
+def apply_time_preference(
+    base_rules: dict,
+    mode: str,
+    earliest_start: Optional[str] = None,
+    latest_end: Optional[str] = None,
+) -> dict:
+    """Return Method 2 rules with runtime time preference overrides applied."""
+    rules = dict(base_rules or {})
+
+    # Method 2 handles time preference explicitly below. Disable legacy time
+    # restrictions here so config.json does not conflict with the user's choice.
+    rules.pop("earliest_start_time", None)
+    rules.pop("latest_end_time", None)
+    rules["allow_night_shift"] = True
+
+    preference = {"mode": mode}
+    if mode == "window":
+        preference["earliest_start"] = earliest_start
+        preference["latest_end"] = latest_end
+
+    rules["time_preference"] = preference
+    return rules
+
 def evaluate_shift_opportunity(
     opportunity: ShiftOpportunity,
     rules: dict,
@@ -244,24 +335,14 @@ def evaluate_shift_opportunity(
     matches, reasons = matches_rules(rule_shift, rules)
     reasons = list(reasons)
 
-    # Existing rules compare clock strings as if start/end are on the same day.
-    # A range such as 15:30 - 00:00 crosses midnight, so handle that explicitly.
-    crosses_midnight = bool(
-        opportunity.start_time
-        and opportunity.end_time
-        and opportunity.end_time <= opportunity.start_time
-    )
-    if crosses_midnight:
-        if not rules.get("allow_night_shift", True):
-            reason = "overnight shift is not allowed"
-            if reason not in reasons:
-                reasons.append(reason)
-
-        latest = rules.get("latest_end_time")
-        if latest:
-            reason = f"ends after {latest} (next day)"
-            if reason not in reasons:
-                reasons.append(reason)
+    preference = rules.get("time_preference")
+    if preference:
+        time_matches, time_reason = _matches_time_preference(
+            opportunity,
+            preference,
+        )
+        if not time_matches and time_reason:
+            reasons.append(time_reason)
 
     if desired_locations:
         location_text = opportunity.location or opportunity.raw_text
