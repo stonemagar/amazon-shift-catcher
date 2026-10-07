@@ -238,14 +238,18 @@ def find_desired_job(page, desired_locations: list[str], log):
 def advance_to_shift_selection(page, log):
     """Automatically follow Apply -> Next -> Start Application -> optional Continue.
 
+    Each stage is clicked at most once. If Amazon opens a new tab, control moves to
+    that tab and the program waits for a different stage before clicking again.
     Security, OTP, CAPTCHA, identity and other verification steps remain manual.
     """
     expected_order = ["APPLY", "NEXT", "START_APPLICATION", "CONTINUE"]
+    clicked_stages = set()
     last_stage = None
     idle_started = time.monotonic()
 
     print("\nAUTOMATIC APPLICATION FLOW")
     print("Following: Apply -> Next -> Start Application -> optional Continue")
+    print("Each application button will be clicked only once.")
     print("Security/verification steps will NOT be bypassed.\n")
 
     while not page.is_closed():
@@ -257,7 +261,7 @@ def advance_to_shift_selection(page, log):
         if stage != last_stage:
             last_stage = stage
             idle_started = time.monotonic()
-            log.info("Application stage detected: %s", stage)
+            log.info("Application stage detected: %s | URL=%s", stage, page.url)
 
         if stage == "SHIFT_SELECTION":
             log.info("Shift-selection page reached.")
@@ -270,7 +274,20 @@ def advance_to_shift_selection(page, log):
             )
 
         if stage in expected_order:
-            log.info("Automatically clicking %s.", stage)
+            if stage in clicked_stages:
+                # Critical guard: do not click Next/Apply again just because the old
+                # page or a slow-loading new tab still exposes the same button.
+                if time.monotonic() - idle_started > 15:
+                    raise RuntimeError(
+                        f"Application stage {stage} did not advance after one click. "
+                        f"Current URL: {page.url}"
+                    )
+                page.wait_for_timeout(400)
+                continue
+
+            clicked_stages.add(stage)
+            log.info("Automatically clicking %s once.", stage)
+
             next_page = click_application_stage(page, stage)
             if next_page is None:
                 raise RuntimeError(f"Could not click expected application stage: {stage}")
@@ -282,6 +299,10 @@ def advance_to_shift_selection(page, log):
                 )
                 page = next_page
 
+            # Wait for the new tab/page to expose a different stage before any
+            # further application click is allowed.
+            idle_started = time.monotonic()
+            page.wait_for_timeout(600)
             continue
 
         if stage == "UNKNOWN" and time.monotonic() - idle_started > 15:
