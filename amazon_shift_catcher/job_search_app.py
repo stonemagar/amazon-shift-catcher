@@ -15,6 +15,7 @@ from .job_search_browser import (
     click_application_stage,
     detect_application_stage,
     find_apply_button,
+    find_open_application_tab,
     normalise_location_terms,
     open_job_candidate,
     open_job_search,
@@ -256,6 +257,24 @@ def advance_to_shift_selection(page, log):
         if page_is_blocked(page):
             raise RuntimeError("Amazon returned a 403 / request-blocked page.")
 
+        # After Apply, Amazon opens the application flow in a new tab.
+        # Re-scan the browser context on every loop so we can recover even if the
+        # new tab appeared just after the click helper returned.
+        if "APPLY" in clicked_stages:
+            application_tab = find_open_application_tab(page)
+            if application_tab is not None and application_tab is not page:
+                log.info(
+                    "Detected Amazon application tab. Switching control to: %s",
+                    application_tab.url,
+                )
+                page = application_tab
+                try:
+                    page.bring_to_front()
+                except Exception:
+                    pass
+                last_stage = None
+                idle_started = time.monotonic()
+
         stage = detect_application_stage(page)
 
         if stage != last_stage:
@@ -282,7 +301,7 @@ def advance_to_shift_selection(page, log):
                         f"Application stage {stage} did not advance after one click. "
                         f"Current URL: {page.url}"
                     )
-                page.wait_for_timeout(400)
+                time.sleep(0.4)
                 continue
 
             clicked_stages.add(stage)
@@ -302,7 +321,7 @@ def advance_to_shift_selection(page, log):
             # Wait for the new tab/page to expose a different stage before any
             # further application click is allowed.
             idle_started = time.monotonic()
-            page.wait_for_timeout(600)
+            time.sleep(0.6)
             continue
 
         if stage == "UNKNOWN" and time.monotonic() - idle_started > 15:
@@ -311,7 +330,7 @@ def advance_to_shift_selection(page, log):
                 "for 15 seconds."
             )
 
-        page.wait_for_timeout(400)
+        time.sleep(0.4)
 
     return None
 
