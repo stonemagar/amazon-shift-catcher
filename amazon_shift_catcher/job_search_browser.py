@@ -251,6 +251,33 @@ def find_continue_button(page: Page):
     return _find_visible_button(page, CONTINUE_RE)
 
 
+def click_application_stage(page: Page, stage: str) -> bool:
+    """Click one known Method 2 application action and wait for the UI to advance."""
+    button = None
+
+    if stage == "APPLY":
+        button = find_apply_button(page)
+    elif stage == "NEXT":
+        button = find_next_button(page)
+    elif stage == "START_APPLICATION":
+        button = find_start_application_button(page)
+    elif stage == "CONTINUE":
+        button = find_continue_button(page)
+    else:
+        return False
+
+    if button is None:
+        return False
+
+    button.click(timeout=7000)
+    try:
+        page.wait_for_load_state("domcontentloaded", timeout=8000)
+    except Exception:
+        pass
+    page.wait_for_timeout(700)
+    return True
+
+
 def shift_selection_page_visible(page: Page) -> bool:
     """Detect the actual shift-selection page, not a normal job-details page."""
     try:
