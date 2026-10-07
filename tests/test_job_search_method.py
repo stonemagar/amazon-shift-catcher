@@ -94,25 +94,51 @@ class JobSearchMethodTests(unittest.TestCase):
                 ],
             )
 
-    def test_application_stage_detects_shift_selection(self):
+    def test_shift_selection_requires_shift_specific_signal(self):
         class DummyLocator:
             def __init__(self, text):
                 self.text = text
+
             def inner_text(self, timeout=3000):
                 return self.text
+
             def count(self):
                 return 0
 
+            def nth(self, index):
+                return self
+
+            def is_visible(self):
+                return False
+
+            def filter(self, has_text=None):
+                return self
+
         class DummyPage:
+            def __init__(self, text):
+                self.text = text
+
             def locator(self, selector):
-                return DummyLocator(
-                    "Start date End date Shift Pay rate Hours Location"
-                )
+                return DummyLocator(self.text)
+
             def get_by_role(self, *args, **kwargs):
                 return DummyLocator("")
 
+        normal_job_details = DummyPage(
+            "Start date 1 November Shift day Pay rate £15.10 "
+            "Hours 20 Location Motherwell"
+        )
+        real_shift_page = DummyPage(
+            "Select work shift Showing 1 of 3 shifts "
+            "Start date End date Shift Pay rate Hours Location"
+        )
+
         self.assertEqual(
-            detect_application_stage(DummyPage()),
+            detect_application_stage(normal_job_details),
+            "UNKNOWN",
+        )
+        self.assertEqual(
+            detect_application_stage(real_shift_page),
             "SHIFT_SELECTION",
         )
 
