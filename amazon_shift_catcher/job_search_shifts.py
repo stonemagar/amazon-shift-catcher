@@ -244,6 +244,25 @@ def evaluate_shift_opportunity(
     matches, reasons = matches_rules(rule_shift, rules)
     reasons = list(reasons)
 
+    # Existing rules compare clock strings as if start/end are on the same day.
+    # A range such as 15:30 - 00:00 crosses midnight, so handle that explicitly.
+    crosses_midnight = bool(
+        opportunity.start_time
+        and opportunity.end_time
+        and opportunity.end_time <= opportunity.start_time
+    )
+    if crosses_midnight:
+        if not rules.get("allow_night_shift", True):
+            reason = "overnight shift is not allowed"
+            if reason not in reasons:
+                reasons.append(reason)
+
+        latest = rules.get("latest_end_time")
+        if latest:
+            reason = f"ends after {latest} (next day)"
+            if reason not in reasons:
+                reasons.append(reason)
+
     if desired_locations:
         location_text = opportunity.location or opportunity.raw_text
         haystack = _compact(location_text).casefold()
