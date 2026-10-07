@@ -1,5 +1,6 @@
 import logging
 import re
+import time
 from dataclasses import dataclass
 
 from playwright.sync_api import Page
@@ -251,8 +252,13 @@ def find_continue_button(page: Page):
     return _find_visible_button(page, CONTINUE_RE)
 
 
-def click_application_stage(page: Page, stage: str) -> bool:
-    """Click one known Method 2 application action and wait for the UI to advance."""
+def click_application_stage(page: Page, stage: str) -> Page | None:
+    """Click one Method 2 action and return the page that should be controlled next.
+
+    Amazon currently opens the application flow in a new tab after Apply. Detect
+    that handoff and switch automation to the new tab instead of clicking Apply
+    repeatedly on the original job-details tab.
+    """
     button = None
 
     if stage == "APPLY":
@@ -264,18 +270,55 @@ def click_application_stage(page: Page, stage: str) -> bool:
     elif stage == "CONTINUE":
         button = find_continue_button(page)
     else:
-        return False
+        return None
 
     if button is None:
-        return False
+        return None
+
+    context = page.context
+    existing_pages = list(context.pages)
 
     button.click(timeout=7000)
+
+    # Give Amazon a short window to create a new application tab.
+    deadline = time.monotonic() + 5
+    next_page = page
+
+    while time.monotonic() < deadline:
+        new_pages = [
+            candidate
+            for candidate in context.pages
+            if candidate not in existing_pages and not candidate.is_closed()
+        ]
+        if new_pages:
+            next_page = new_pages[-1]
+            break
+
+        # If the current tab navigated instead, keep using it.
+        try:
+            if page.is_closed():
+                break
+        except Exception:
+            break
+
+        time.sleep(0.1)
+
     try:
-        page.wait_for_load_state("domcontentloaded", timeout=8000)
+        next_page.bring_to_front()
     except Exception:
         pass
-    page.wait_for_timeout(700)
-    return True
+
+    try:
+        next_page.wait_for_load_state("domcontentloaded", timeout=8000)
+    except Exception:
+        pass
+
+    try:
+        next_page.wait_for_timeout(700)
+    except Exception:
+        pass
+
+    return next_page
 
 
 def shift_selection_page_visible(page: Page) -> bool:
