@@ -367,6 +367,16 @@ def find_desired_job(page, desired_locations: list[str], log):
         "were discovered and checked.",
         len(seen_keys),
     )
+    if reported_total is not None and len(seen_keys) < reported_total:
+        log.warning(
+            "Amazon reports %s total job result(s), but %s Warehouse Associate "
+            "card(s) were discovered. The reported total can include other role "
+            "titles; if more Warehouse Associate cards are visibly present, send "
+            "the card titles or a screenshot so the title/card detector can be "
+            "adjusted.",
+            reported_total,
+            len(seen_keys),
+        )
     return None
 
 
