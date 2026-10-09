@@ -26,6 +26,7 @@ from .job_search_browser import (
     open_job_candidate,
     open_job_search,
     page_is_blocked,
+    read_job_detail_location,
     read_job_detail_text,
     read_reported_job_count,
     read_warehouse_job_cards,
@@ -601,6 +602,18 @@ def find_desired_job(
                                 "Amazon returned a 403 / request-blocked page."
                             )
 
+                        detail_location = read_job_detail_location(page)
+                        if detail_location:
+                            added = save_unique_locations(
+                                LOCATION_STORE,
+                                [detail_location],
+                            )
+                            if added:
+                                log.info(
+                                    "Saved new detailed job location: %s",
+                                    detail_location,
+                                )
+
                         detail_text = read_job_detail_text(page)
                         apply_button = find_apply_button(page)
                         if apply_button is None:
@@ -652,9 +665,21 @@ def find_desired_job(
                         "Amazon returned a 403 / request-blocked page."
                     )
 
+                detail_location = read_job_detail_location(page)
+                if detail_location:
+                    added = save_unique_locations(
+                        LOCATION_STORE,
+                        [detail_location],
+                    )
+                    if added:
+                        log.info(
+                            "Saved new detailed job location: %s",
+                            detail_location,
+                        )
+
                 detail_text = read_job_detail_text(page)
                 detail_rank = location_match_rank(
-                    detail_text,
+                    detail_location or detail_text,
                     desired_locations,
                 )
 
