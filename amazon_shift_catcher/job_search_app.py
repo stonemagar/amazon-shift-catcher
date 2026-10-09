@@ -18,6 +18,8 @@ from .job_search_browser import (
     find_apply_button,
     find_open_application_tab,
     find_submit_application_button,
+    go_to_job_results_page,
+    go_to_next_job_results_page,
     job_candidate_key,
     location_match_rank,
     normalise_location_terms,
@@ -425,6 +427,15 @@ def _find_candidate_by_key(page, wanted_key: str):
 
 
 def _open_ranked_job_match(page, match: dict, log):
+    target_page = int(match.get("page", 1))
+    if target_page > 1:
+        if not go_to_job_results_page(page, target_page):
+            log.warning(
+                "Could not return to Amazon result page %s for the selected match.",
+                target_page,
+            )
+            return None
+
     candidate = _find_candidate_by_key(page, match["key"])
     if candidate is None:
         log.warning(
@@ -502,9 +513,10 @@ def find_desired_job(
 
     checked_keys = set()
     scan_steps = 0
-    max_scan_steps = 40
+    max_scan_steps = 100
     no_new_batches = 0
     best_match = None
+    current_page = 1
 
     while scan_steps < max_scan_steps:
         cards = read_warehouse_job_cards(page)
@@ -563,9 +575,10 @@ def find_desired_job(
                     else "?"
                 )
                 log.info(
-                    "Checking Warehouse Associate card %s/%s: %s",
+                    "Checking Warehouse Associate card %s/%s on results page %s: %s",
                     card_number,
                     total_label,
+                    current_page,
                     candidate.text[:350] or "<no readable card text>",
                 )
 
@@ -610,6 +623,7 @@ def find_desired_job(
                             "key": job_candidate_key(candidate),
                             "rank": match_rank,
                             "detail_text": "",
+                            "page": current_page,
                         }
                         log.info(
                             "Stored current best location match: %s "
@@ -667,6 +681,7 @@ def find_desired_job(
                             "key": key,
                             "rank": detail_rank,
                             "detail_text": detail_text,
+                            "page": current_page,
                         }
                         log.info(
                             "Stored current best detailed location match at "
@@ -678,6 +693,12 @@ def find_desired_job(
                     "Returning to search results and continuing the full scan."
                 )
                 return_to_job_search(page)
+                if current_page > 1:
+                    if not go_to_job_results_page(page, current_page):
+                        raise RuntimeError(
+                            f"Could not return to Amazon results page {current_page} "
+                            "after checking a multiple-location card."
+                        )
                 reset_job_search_scroll(page)
                 restart_scan = True
                 break
@@ -705,12 +726,26 @@ def find_desired_job(
         if final_new:
             continue
 
+        # The Amazon job list is paginated. After exhausting the current page,
+        # move to page 2, page 3, etc. instead of treating page 1 as the full
+        # result set.
+        next_page = current_page + 1
+        if go_to_next_job_results_page(page, current_page):
+            current_page = next_page
+            no_new_batches = 0
+            log.info(
+                "Moved to Amazon job results page %s. Continuing scan.",
+                current_page,
+            )
+            continue
+
         if no_new_batches >= 1 or not moved:
             break
 
     log.info(
-        "Finished full result-page scan. %s unique Warehouse Associate card(s) "
-        "were discovered and checked.",
+        "Finished full result scan across %s page(s). %s unique Warehouse "
+        "Associate card(s) were discovered and checked.",
+        current_page,
         len(checked_keys),
     )
 
