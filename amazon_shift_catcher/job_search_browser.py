@@ -44,6 +44,73 @@ class JobCandidate:
     location: str | None
 
 
+def extract_reported_job_count(text: str) -> int | None:
+    """Read Amazon's '20 jobs found' style result count when present."""
+    match = re.search(r"\b(\d+)\s+jobs?\s+found\b", text, re.I)
+    return int(match.group(1)) if match else None
+
+
+def read_reported_job_count(page: Page) -> int | None:
+    try:
+        body = page.locator("body").inner_text(timeout=2500)
+    except Exception:
+        return None
+    return extract_reported_job_count(body)
+
+
+def job_candidate_key(candidate: JobCandidate) -> str:
+    """Return a stable key for one result card across scroll/lazy-load cycles."""
+    try:
+        link = candidate.card.locator("a").first
+        if link.count():
+            href = link.get_attribute("href")
+            if href:
+                return "href:" + href.strip().casefold()
+    except Exception:
+        pass
+
+    return "text:" + " ".join(candidate.text.split()).casefold()
+
+
+def reset_job_search_scroll(page: Page) -> None:
+    """Return the result page to the top before a full scan."""
+    try:
+        page.evaluate("window.scrollTo(0, 0)")
+        page.wait_for_timeout(150)
+    except Exception:
+        pass
+
+
+def scroll_job_search_results(page: Page) -> bool:
+    """Scroll one viewport through Amazon's lazy-loaded job results.
+
+    Returns True when the page moved. Amazon currently uses the main document
+    scrollbar for this result list, so repeated calls expose cards that are not
+    mounted in the DOM at the top of the page.
+    """
+    try:
+        result = page.evaluate(
+            """() => {
+                const root = document.scrollingElement || document.documentElement;
+                const before = root.scrollTop;
+                const step = Math.max(Math.floor(window.innerHeight * 0.80), 500);
+                root.scrollTop = Math.min(
+                    root.scrollTop + step,
+                    Math.max(0, root.scrollHeight - root.clientHeight)
+                );
+                return {
+                    before,
+                    after: root.scrollTop,
+                    max: Math.max(0, root.scrollHeight - root.clientHeight)
+                };
+            }"""
+        )
+        page.wait_for_timeout(300)
+        return bool(result and result.get("after", 0) > result.get("before", 0))
+    except Exception:
+        return False
+
+
 def normalise_location_terms(raw: str) -> list[str]:
     """Return comma-separated location alternatives in normalized form."""
     result = []
