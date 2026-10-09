@@ -562,7 +562,7 @@ def advance_to_shift_selection(page, log):
     Security, OTP, CAPTCHA, identity and other verification steps remain manual.
     """
     expected_order = ["APPLY", "NEXT", "START_APPLICATION", "CONTINUE"]
-    clicked_stages = set()
+    clicked_actions = set()
     last_stage = None
     idle_started = time.monotonic()
 
@@ -578,7 +578,7 @@ def advance_to_shift_selection(page, log):
         # After Apply, Amazon opens the application flow in a new tab.
         # Re-scan the browser context on every loop so we can recover even if the
         # new tab appeared just after the click helper returned.
-        if "APPLY" in clicked_stages:
+        if any(stage == "APPLY" for stage, _url in clicked_actions):
             application_tab = find_open_application_tab(page)
             if application_tab is not None and application_tab is not page:
                 log.info(
@@ -610,10 +610,25 @@ def advance_to_shift_selection(page, log):
                 "Complete it manually, then run the catcher again."
             )
 
+        if stage == "POST_SHIFT":
+            log.warning(
+                "Amazon resumed this application after shift selection. "
+                "A scheduleId is already attached, so Method 2 will not click "
+                "the later Additional Information 'Next' button."
+            )
+            print(
+                "\nAPPLICATION ALREADY PROGRESSED PAST SHIFT SELECTION. "
+                "A schedule is already attached to this application."
+            )
+            return None
+
         if stage in expected_order:
-            if stage in clicked_stages:
-                # Critical guard: do not click Next/Apply again just because the old
-                # page or a slow-loading new tab still exposes the same button.
+            action_key = (stage, page.url)
+
+            if action_key in clicked_actions:
+                # Guard against re-clicking the same control while one page is
+                # still loading. The same label on a different URL is a
+                # different application step.
                 if time.monotonic() - idle_started > 15:
                     raise RuntimeError(
                         f"Application stage {stage} did not advance after one click. "
@@ -622,7 +637,7 @@ def advance_to_shift_selection(page, log):
                 time.sleep(0.4)
                 continue
 
-            clicked_stages.add(stage)
+            clicked_actions.add(action_key)
             log.info("Automatically clicking %s once.", stage)
 
             next_page = click_application_stage(page, stage)
