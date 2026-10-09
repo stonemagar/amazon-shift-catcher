@@ -3,6 +3,7 @@ import unittest
 from pathlib import Path
 
 from amazon_shift_catcher.job_search_browser import (
+    click_confirm_selection,
     WAREHOUSE_TITLE_RE,
     card_requires_detail_location_check,
     detect_application_stage,
@@ -223,6 +224,55 @@ class JobSearchMethodTests(unittest.TestCase):
             detect_application_stage(DummyPage()),
             "APPOINTMENT_SELECTION",
         )
+
+    def test_confirm_selection_clicks_once_and_reaches_submit(self):
+        class DummyItem:
+            def __init__(self, text, page):
+                self.text = text
+                self.page = page
+                self.clicked = 0
+
+            def is_visible(self):
+                return True
+
+            def click(self, timeout=5000):
+                self.clicked += 1
+                if self.text == "Confirm Selection":
+                    self.page.submit_visible = True
+
+        class DummyLocator:
+            def __init__(self, item=None):
+                self.item = item
+
+            def count(self):
+                return 1 if self.item is not None else 0
+
+            def nth(self, _index):
+                return self.item
+
+            def filter(self, has_text=None):
+                return self
+
+        class DummyPage:
+            def __init__(self):
+                self.submit_visible = False
+                self.confirm = DummyItem("Confirm Selection", self)
+                self.submit = DummyItem("Submit application", self)
+
+            def get_by_role(self, role, name=None):
+                pattern = getattr(name, "pattern", "")
+                if "Confirm" in pattern:
+                    return DummyLocator(self.confirm)
+                if "Submit" in pattern and self.submit_visible:
+                    return DummyLocator(self.submit)
+                return DummyLocator()
+
+            def locator(self, _selector):
+                return DummyLocator()
+
+        page = DummyPage()
+        self.assertTrue(click_confirm_selection(page))
+        self.assertEqual(page.confirm.clicked, 1)
 
     def test_parse_method2_shift_card(self):
         raw = (
