@@ -27,6 +27,7 @@ from .job_search_browser import (
     open_job_search,
     page_is_blocked,
     read_job_detail_location,
+    read_job_detail_locations,
     read_job_detail_text,
     read_reported_job_count,
     read_warehouse_job_cards,
@@ -666,41 +667,35 @@ def find_desired_job(
                     )
 
                 detail_text = read_job_detail_text(page)
-                detail_location = read_job_detail_location(page)
+                detail_locations = read_job_detail_locations(
+                    page,
+                    desired_locations,
+                )
 
-                # If Amazon exposes the desired city in the detail text but its
-                # layout has no parseable location label/address line, at least
-                # preserve that matched city instead of losing the discovery.
-                if not detail_location and desired_locations:
-                    compact_detail = detail_text.casefold()
-                    for desired in desired_locations:
-                        if desired.casefold() in compact_detail:
-                            detail_location = desired
-                            break
-
-                if detail_location:
+                if detail_locations:
                     added = save_unique_locations(
                         LOCATION_STORE,
-                        [detail_location],
+                        detail_locations,
                     )
                     if added:
                         log.info(
-                            "Saved new detailed job location: %s",
-                            detail_location,
+                            "Saved new detailed job location(s): %s",
+                            ", ".join(added),
                         )
                     else:
                         log.info(
-                            "Detailed job location already known: %s",
-                            detail_location,
+                            "Detailed job location(s) already known: %s",
+                            ", ".join(detail_locations),
                         )
                 else:
                     log.warning(
                         "Multiple-location job opened, but no detailed location "
-                        "could be parsed from the job page."
+                        "could be extracted from the loaded job page."
                     )
 
+                detail_source = " ".join(detail_locations) or detail_text
                 detail_rank = location_match_rank(
-                    detail_location or detail_text,
+                    detail_source,
                     desired_locations,
                 )
 
