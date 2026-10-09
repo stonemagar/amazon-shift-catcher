@@ -13,9 +13,11 @@ from .alarm import start_alarm, stop_alarm
 from .job_search_browser import (
     card_requires_detail_location_check,
     click_application_stage,
+    click_confirm_selection,
     detect_application_stage,
     find_apply_button,
     find_open_application_tab,
+    find_submit_application_button,
     job_candidate_key,
     normalise_location_terms,
     open_job_candidate,
@@ -64,6 +66,7 @@ class JobSearchState(str, Enum):
     SHIFT_DETAILS = "SHIFT_DETAILS"
     JOB_SELECTED = "JOB_SELECTED"
     APPOINTMENT_SELECTION = "APPOINTMENT_SELECTION"
+    APPLICATION_REVIEW = "APPLICATION_REVIEW"
     SECURITY_CHECK = "SECURITY_CHECK"
     BLOCKED = "BLOCKED"
     ERROR = "ERROR"
@@ -878,23 +881,48 @@ def run() -> None:
                                 "job-search-prehire-appointment",
                                 log,
                             )
+                            log.warning(
+                                "Pre-hire appointment page reached. "
+                                "Automatically clicking 'Confirm Selection' once "
+                                "without changing the displayed appointment."
+                            )
+
+                            confirmed = click_confirm_selection(page)
+                            if not confirmed:
+                                raise RuntimeError(
+                                    "Could not click 'Confirm Selection' or "
+                                    "confirm the Submit application page."
+                                )
+
+                            state = JobSearchState.APPLICATION_REVIEW
+                            _save_screenshot(
+                                page,
+                                "job-search-application-review",
+                                log,
+                            )
+
+                            if find_submit_application_button(page) is None:
+                                raise RuntimeError(
+                                    "Appointment was confirmed, but the "
+                                    "'Submit application' button was not found."
+                                )
+
                             print(
-                                "\nPRE-HIRE APPOINTMENT PAGE REACHED."
+                                "\n'CONFIRM SELECTION' CLICKED AUTOMATICALLY."
                             )
                             print(
-                                "The program has stopped before choosing or "
-                                "confirming an appointment."
+                                "The program has stopped before 'Submit application'."
                             )
                             _notify(
-                                "Amazon pre-hire appointment page reached. "
-                                "The program stopped before choosing or confirming "
-                                "an appointment.",
-                                title="AMAZON APPOINTMENT PAGE READY",
+                                "Amazon appointment selection was confirmed "
+                                "automatically. The program stopped before "
+                                "'Submit application'.",
+                                title="AMAZON APPOINTMENT CONFIRMED",
                                 priority=5,
                             )
                             stop_reason = (
-                                "pre-hire appointment page reached; "
-                                "appointment selection awaiting user"
+                                "Confirm Selection clicked; "
+                                "Submit application awaiting user"
                             )
                             break
 
