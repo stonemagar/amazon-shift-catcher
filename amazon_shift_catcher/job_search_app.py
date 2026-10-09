@@ -458,6 +458,26 @@ def _open_ranked_job_match(page, match: dict, log):
     }
 
 
+def _unchecked_job_candidates(cards, checked_keys: set[str]):
+    """Return cards that have not actually been processed yet.
+
+    Do not mark a whole visible batch as checked up front: opening an ambiguous
+    multi-location card can navigate away mid-batch, and the remaining cards
+    must still be checked after returning to the search results.
+    """
+    result = []
+    batch_keys = set()
+
+    for candidate in cards:
+        key = job_candidate_key(candidate)
+        if key in checked_keys or key in batch_keys:
+            continue
+        batch_keys.add(key)
+        result.append(candidate)
+
+    return result
+
+
 def find_desired_job(
     page,
     desired_locations: list[str],
@@ -480,7 +500,7 @@ def find_desired_job(
 
     reset_job_search_scroll(page)
 
-    seen_keys = set()
+    checked_keys = set()
     scan_steps = 0
     max_scan_steps = 40
     no_new_batches = 0
@@ -488,14 +508,17 @@ def find_desired_job(
 
     while scan_steps < max_scan_steps:
         cards = read_warehouse_job_cards(page)
-        new_cards = []
 
-        for candidate in cards:
-            key = job_candidate_key(candidate)
-            if key in seen_keys:
-                continue
-            seen_keys.add(key)
-            new_cards.append(candidate)
+        # Amazon sometimes reports results before lazy-loaded cards are mounted.
+        # Retry briefly instead of treating a temporary empty render as a full scan.
+        if not cards and reported_total:
+            for _retry in range(3):
+                time.sleep(0.4)
+                cards = read_warehouse_job_cards(page)
+                if cards:
+                    break
+
+        new_cards = _unchecked_job_candidates(cards, checked_keys)
 
         if new_cards:
             no_new_batches = 0
@@ -517,15 +540,24 @@ def find_desired_job(
 
             log.info(
                 "Discovered %s new Warehouse Associate card(s); "
-                "%s unique card(s) checked/discovered so far.",
+                "%s unchecked Warehouse Associate card(s) are visible; "
+                "%s card(s) have actually been checked so far.",
                 len(new_cards),
-                len(seen_keys),
+                len(checked_keys),
             )
 
             restart_scan = False
 
-            for offset, candidate in enumerate(new_cards):
-                card_number = len(seen_keys) - len(new_cards) + offset + 1
+            for candidate in new_cards:
+                key = job_candidate_key(candidate)
+                if key in checked_keys:
+                    continue
+
+                # Mark only the card we are about to process. If an ambiguous
+                # card navigates away and forces a restart, later cards in this
+                # batch remain unchecked and will be processed on the next pass.
+                checked_keys.add(key)
+                card_number = len(checked_keys)
                 total_label = (
                     str(reported_total)
                     if reported_total is not None
@@ -600,7 +632,6 @@ def find_desired_job(
                     "Card says multiple on site locations available. "
                     "Opening it to check the detailed location."
                 )
-                key = job_candidate_key(candidate)
                 open_job_candidate(page, candidate)
 
                 if page_is_blocked(page):
@@ -670,7 +701,7 @@ def find_desired_job(
         final_new = [
             candidate
             for candidate in final_cards
-            if job_candidate_key(candidate) not in seen_keys
+            if job_candidate_key(candidate) not in checked_keys
         ]
         if final_new:
             continue
@@ -681,7 +712,7 @@ def find_desired_job(
     log.info(
         "Finished full result-page scan. %s unique Warehouse Associate card(s) "
         "were discovered and checked.",
-        len(seen_keys),
+        len(checked_keys),
     )
 
     if best_match is not None:
@@ -693,7 +724,7 @@ def find_desired_job(
         )
         return _open_ranked_job_match(page, best_match, log)
 
-    if reported_total is not None and len(seen_keys) < reported_total:
+    if reported_total is not None and len(checked_keys) < reported_total:
         log.warning(
             "Amazon reports %s total job result(s), but %s Warehouse Associate "
             "card(s) were discovered. The reported total can include other role "
@@ -701,7 +732,7 @@ def find_desired_job(
             "the card titles or a screenshot so the title/card detector can be "
             "adjusted.",
             reported_total,
-            len(seen_keys),
+            len(checked_keys),
         )
     return None
 
