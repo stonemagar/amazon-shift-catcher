@@ -50,6 +50,34 @@ def normalise_user_time(value: str) -> Optional[str]:
     return None
 
 
+def normalise_user_days(raw: str) -> tuple[list[str], list[str]]:
+    """Normalize user-entered day names such as Wed, Thu, Friday."""
+    selected = []
+    invalid = []
+
+    for token in re.split(r"[,/\s]+", raw.strip()):
+        compact = token.strip()
+        if not compact:
+            continue
+
+        folded = compact.casefold()
+        matches = [
+            day
+            for day in DAY_NAMES
+            if len(folded) >= 3 and day.casefold().startswith(folded)
+        ]
+
+        if len(matches) != 1:
+            invalid.append(compact)
+            continue
+
+        day = matches[0]
+        if day not in selected:
+            selected.append(day)
+
+    return selected, invalid
+
+
 def _label_pattern(label: str) -> str:
     return re.escape(label).replace(r"\ ", r"\s*")
 
@@ -287,10 +315,19 @@ def _matches_time_preference(
             shift_start += 24 * 60
             shift_end += 24 * 60
 
+        window_label = (
+            f"{preference['earliest_start']} - {preference['latest_end']}"
+        )
+        shift_label = f"{opportunity.start_time} - {opportunity.end_time}"
+
+        if shift_start > window_end:
+            return False, (
+                f"shift {shift_label} is outside requested window {window_label}"
+            )
         if shift_start < earliest:
-            return False, f"starts before requested window {preference['earliest_start']}"
+            return False, f"starts before requested window {window_label}"
         if shift_end > window_end:
-            return False, f"ends after requested window {preference['latest_end']}"
+            return False, f"ends after requested window {window_label}"
         return True, None
 
     return False, f"unknown time preference mode: {mode}"
@@ -319,6 +356,65 @@ def apply_time_preference(
     rules["time_preference"] = preference
     return rules
 
+
+def apply_hours_preference(
+    base_rules: dict,
+    mode: str,
+    *,
+    exact_hours: Optional[float] = None,
+    max_hours: Optional[float] = None,
+    preferred_hours: Optional[float] = None,
+) -> dict:
+    """Apply the user's Method 2 weekly-hours choice for this run."""
+    rules = dict(base_rules or {})
+    rules.pop("max_hours_per_week", None)
+    rules.pop("preferred_hours_order", None)
+    rules.pop("hours_preference", None)
+
+    preference = {"mode": mode}
+
+    if mode == "exact":
+        preference["exact_hours"] = float(exact_hours)
+        rules["preferred_hours_order"] = [float(exact_hours)]
+    elif mode == "max":
+        preference["max_hours"] = float(max_hours)
+        rules["max_hours_per_week"] = float(max_hours)
+    elif mode == "preferred_max":
+        preference["preferred_hours"] = float(preferred_hours)
+        preference["max_hours"] = float(max_hours)
+        rules["max_hours_per_week"] = float(max_hours)
+        rules["preferred_hours_order"] = [float(preferred_hours)]
+    elif mode != "any":
+        raise ValueError(f"Unknown hours preference mode: {mode}")
+
+    rules["hours_preference"] = preference
+    return rules
+
+
+def apply_days_preference(
+    base_rules: dict,
+    mode: str,
+    days: Optional[list[str]] = None,
+) -> dict:
+    """Apply the user's Method 2 day choice for this run."""
+    rules = dict(base_rules or {})
+    rules.pop("allowed_days", None)
+    rules.pop("blocked_days", None)
+    rules.pop("days_preference", None)
+
+    selected = list(days or [])
+    preference = {"mode": mode, "days": selected}
+
+    if mode == "allowed":
+        rules["allowed_days"] = selected
+    elif mode == "blocked":
+        rules["blocked_days"] = selected
+    elif mode != "any":
+        raise ValueError(f"Unknown days preference mode: {mode}")
+
+    rules["days_preference"] = preference
+    return rules
+
 def evaluate_shift_opportunity(
     opportunity: ShiftOpportunity,
     rules: dict,
@@ -334,6 +430,19 @@ def evaluate_shift_opportunity(
 
     matches, reasons = matches_rules(rule_shift, rules)
     reasons = list(reasons)
+
+    hours_preference = rules.get("hours_preference", {})
+    if hours_preference.get("mode") == "exact":
+        requested = float(hours_preference["exact_hours"])
+        if opportunity.hours_per_week is None:
+            reason = "weekly hours could not be read"
+            if reason not in reasons:
+                reasons.append(reason)
+        elif abs(opportunity.hours_per_week - requested) > 1e-9:
+            reasons.append(
+                f"{opportunity.hours_per_week:g}h does not equal requested "
+                f"{requested:g}h"
+            )
 
     preference = rules.get("time_preference")
     if preference:
