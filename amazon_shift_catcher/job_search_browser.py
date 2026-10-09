@@ -547,9 +547,19 @@ def shift_selection_page_visible(page: Page) -> bool:
 
 
 def detect_application_stage(page: Page) -> str:
-    """Identify the next user-controlled step after a matching job is opened."""
+    """Identify the next application stage after a matching job is opened."""
     if page_has_security_challenge(page):
         return "SECURITY_CHECK"
+
+    # If Amazon resumes an application that already has a schedule attached,
+    # do not mistake its later "Next" button for the pre-consent "Next".
+    try:
+        url = page.url.lower()
+    except Exception:
+        url = ""
+
+    if "#/additional-information" in url and "scheduleid=" in url:
+        return "POST_SHIFT"
 
     # Prefer visible action buttons over generic page text. This prevents the
     # job-details page from being mistaken for shift selection.
