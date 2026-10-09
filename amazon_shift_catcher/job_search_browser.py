@@ -842,11 +842,69 @@ def open_job_candidate(page: Page, candidate: JobCandidate) -> None:
             pass
 
 
+def extract_job_detail_location(raw_text: str) -> str | None:
+    """Extract a location/address shown on an opened Amazon job-details page."""
+    lines = [" ".join(line.split()).strip() for line in raw_text.splitlines()]
+    lines = [line for line in lines if line]
+
+    labels = (
+        "Work address",
+        "Work location",
+        "Job location",
+        "Location",
+    )
+
+    for index, line in enumerate(lines):
+        for label in labels:
+            match = re.match(
+                rf"^\s*{re.escape(label)}\s*:?\s*(.*)$",
+                line,
+                re.I,
+            )
+            if not match:
+                continue
+
+            value = " ".join(match.group(1).split()).strip()
+            if value and len(value) <= 220:
+                return value
+
+            # Some layouts put the label and value on separate lines.
+            if index + 1 < len(lines):
+                next_line = lines[index + 1]
+                lower = next_line.casefold()
+                if (
+                    len(next_line) <= 220
+                    and lower not in {"apply", "share"}
+                    and not any(
+                        lower.startswith(prefix)
+                        for prefix in (
+                            "type:",
+                            "duration:",
+                            "pay rate:",
+                            "hours:",
+                            "job id:",
+                        )
+                    )
+                ):
+                    return next_line
+
+    return None
+
+
 def read_job_detail_text(page: Page) -> str:
     try:
         return " ".join(page.locator("body").inner_text(timeout=3000).split())
     except Exception:
         return ""
+
+
+def read_job_detail_location(page: Page) -> str | None:
+    """Read the explicit location/address from an opened job-details page."""
+    try:
+        raw_text = page.locator("body").inner_text(timeout=3000)
+    except Exception:
+        return None
+    return extract_job_detail_location(raw_text)
 
 
 def return_to_job_search(page: Page) -> None:
