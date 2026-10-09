@@ -306,6 +306,43 @@ def find_accept_offer_button(page: Page):
     )
 
 
+def focus_accept_offer_button(page: Page) -> bool:
+    """Bring Brave forward and focus the visible 'Accept offer' button."""
+    button = find_accept_offer_button(page)
+    if button is None:
+        return False
+
+    try:
+        button.scroll_into_view_if_needed(timeout=2500)
+    except Exception:
+        pass
+
+    try:
+        button.focus()
+    except Exception:
+        return False
+
+    try:
+        page.bring_to_front()
+    except Exception:
+        pass
+
+    return True
+
+
+def click_accept_offer_button(page: Page) -> bool:
+    """Click the visible 'Accept offer' button exactly once."""
+    button = find_accept_offer_button(page)
+    if button is None:
+        return False
+
+    try:
+        button.click(timeout=5000)
+        return True
+    except Exception:
+        return False
+
+
 def click_select_this_job(
     page: Page,
     timeout_seconds: float = 8.0,
