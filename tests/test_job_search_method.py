@@ -12,8 +12,11 @@ from amazon_shift_catcher.job_search_browser import (
     text_matches_location,
 )
 from amazon_shift_catcher.job_search_shifts import (
+    apply_days_preference,
+    apply_hours_preference,
     apply_time_preference,
     evaluate_shift_opportunity,
+    normalise_user_days,
     normalise_user_time,
     parse_shift_opportunity,
 )
@@ -196,6 +199,51 @@ class JobSearchMethodTests(unittest.TestCase):
         self.assertTrue(matched)
         self.assertEqual(reasons, [])
         self.assertGreater(score, 0)
+
+    def test_method2_exact_hours_preference(self):
+        opportunity = parse_shift_opportunity(
+            "Shift: Thu, Fri 09:00 - 13:00\n"
+            "Hours: 20hrs per week\n"
+            "Location: Motherwell"
+        )
+        exact_20 = apply_hours_preference({}, "exact", exact_hours=20)
+        exact_16 = apply_hours_preference({}, "exact", exact_hours=16)
+
+        self.assertTrue(
+            evaluate_shift_opportunity(
+                opportunity,
+                exact_20,
+                ["Motherwell"],
+            )[0]
+        )
+
+        matched, reasons, _ = evaluate_shift_opportunity(
+            opportunity,
+            exact_16,
+            ["Motherwell"],
+        )
+        self.assertFalse(matched)
+        self.assertIn("20h does not equal requested 16h", reasons)
+
+    def test_method2_any_days_remove_config_day_restrictions(self):
+        base = {
+            "allowed_days": ["Wednesday", "Thursday"],
+            "blocked_days": ["Monday"],
+        }
+        rules = apply_days_preference(base, "any")
+        self.assertNotIn("allowed_days", rules)
+        self.assertNotIn("blocked_days", rules)
+
+    def test_normalise_user_days(self):
+        days, invalid = normalise_user_days("Wed, Thu Friday, sun")
+        self.assertEqual(
+            days,
+            ["Wednesday", "Thursday", "Friday", "Sunday"],
+        )
+        self.assertEqual(invalid, [])
+
+        _days, invalid = normalise_user_days("Wed, Funday")
+        self.assertEqual(invalid, ["Funday"])
 
     def test_method2_time_preference_modes(self):
         day_shift = parse_shift_opportunity(
