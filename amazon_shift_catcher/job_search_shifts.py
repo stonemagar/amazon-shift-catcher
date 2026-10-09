@@ -1,4 +1,5 @@
 import re
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
@@ -17,6 +18,7 @@ FIELD_LABELS = (
     "Location",
 )
 START_DATE_RE = re.compile(r"^\s*Start\s*Date\b", re.I)
+SELECT_THIS_JOB_RE = re.compile(r"^\s*Select\s+this\s+job\s*$", re.I)
 
 
 @dataclass
@@ -254,6 +256,70 @@ def read_shift_opportunities(page: Page) -> list[ShiftOpportunity]:
         )
 
     return opportunities
+
+
+def _visible_first(locator):
+    try:
+        count = locator.count()
+    except Exception:
+        return None
+
+    for index in range(count):
+        item = locator.nth(index)
+        try:
+            if item.is_visible():
+                return item
+        except Exception:
+            continue
+
+    return None
+
+
+def find_select_this_job_button(page: Page):
+    """Return the visible Part 8 'Select this job' control, if present."""
+    button = _visible_first(
+        page.get_by_role("button", name=SELECT_THIS_JOB_RE)
+    )
+    if button is not None:
+        return button
+
+    return _visible_first(
+        page.locator("button, [role='button'], a").filter(
+            has_text=SELECT_THIS_JOB_RE
+        )
+    )
+
+
+def open_shift_opportunity(
+    page: Page,
+    opportunity: ShiftOpportunity,
+    timeout_seconds: float = 8.0,
+) -> bool:
+    """Open one matched shift card and stop on the 'Select this job' page.
+
+    This clicks only the shift card itself. It never clicks 'Select this job',
+    'Accept offer', or any later application action.
+    """
+    if opportunity.card is None:
+        return False
+
+    try:
+        opportunity.card.scroll_into_view_if_needed(timeout=2500)
+    except Exception:
+        pass
+
+    try:
+        opportunity.card.click(timeout=5000)
+    except Exception:
+        return False
+
+    deadline = time.monotonic() + max(1.0, timeout_seconds)
+    while time.monotonic() < deadline:
+        if find_select_this_job_button(page) is not None:
+            return True
+        time.sleep(0.15)
+
+    return False
 
 
 
