@@ -539,7 +539,6 @@ def find_desired_job(
                 )
 
             log.info(
-                "Discovered %s new Warehouse Associate card(s); "
                 "%s unchecked Warehouse Associate card(s) are visible; "
                 "%s card(s) have actually been checked so far.",
                 len(new_cards),
