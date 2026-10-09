@@ -9,6 +9,7 @@ from amazon_shift_catcher.job_search_browser import (
     detect_application_stage,
     extract_card_location,
     extract_reported_job_count,
+    location_match_rank,
     normalise_location_terms,
     text_matches_location,
 )
@@ -36,6 +37,33 @@ class JobSearchMethodTests(unittest.TestCase):
         self.assertEqual(
             normalise_location_terms(" Wembley, DA1, wembley , Croydon "),
             ["Wembley", "DA1", "Croydon"],
+        )
+
+    def test_location_priority_rank_uses_entered_order(self):
+        locations = ["Dunfermline", "Portadown", "Motherwell"]
+        self.assertEqual(
+            location_match_rank(
+                "Warehouse Associate - Motherwell, Scotland",
+                locations,
+            ),
+            2,
+        )
+        self.assertEqual(
+            location_match_rank(
+                "James Park, Portadown, Northern Ireland",
+                locations,
+            ),
+            1,
+        )
+        self.assertEqual(
+            location_match_rank(
+                "Dunfermline, Scotland",
+                locations,
+            ),
+            0,
+        )
+        self.assertIsNone(
+            location_match_rank("Dartford, Kent", locations)
         )
 
     def test_empty_location_accepts_any_job(self):
