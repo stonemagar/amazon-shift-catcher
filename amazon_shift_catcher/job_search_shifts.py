@@ -307,13 +307,22 @@ def find_accept_offer_button(page: Page):
 
 
 def focus_accept_offer_button(page: Page) -> bool:
-    """Bring Brave forward and focus the visible 'Accept offer' button."""
+    """Bring Brave forward and place 'Accept offer' in the visible viewport."""
     button = find_accept_offer_button(page)
     if button is None:
         return False
 
     try:
         button.scroll_into_view_if_needed(timeout=2500)
+    except Exception:
+        pass
+
+    # Centre the button where possible so the user does not need to scroll down
+    # or hunt for it before making the final decision.
+    try:
+        button.evaluate(
+            "(element) => element.scrollIntoView({block: 'center', inline: 'nearest'})"
+        )
     except Exception:
         pass
 
@@ -324,6 +333,11 @@ def focus_accept_offer_button(page: Page) -> bool:
 
     try:
         page.bring_to_front()
+    except Exception:
+        pass
+
+    try:
+        page.wait_for_timeout(150)
     except Exception:
         pass
 
