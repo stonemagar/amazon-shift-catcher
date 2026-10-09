@@ -31,8 +31,11 @@ from .job_search_browser import (
     wait_for_manual_login,
 )
 from .job_search_shifts import (
+    apply_days_preference,
+    apply_hours_preference,
     apply_time_preference,
     evaluate_shift_opportunity,
+    normalise_user_days,
     normalise_user_time,
     read_shift_opportunities,
 )
@@ -103,6 +106,118 @@ def choose_desired_locations() -> list[str]:
 
 
 
+def _read_positive_hours(prompt: str) -> float:
+    while True:
+        raw = input(prompt).strip()
+        try:
+            value = float(raw)
+            if value > 0:
+                return value
+        except ValueError:
+            pass
+        print("Please enter a positive number, for example 20 or 16.5.")
+
+
+def choose_hours_preference(base_rules: dict) -> dict:
+    print("\n" + "=" * 64)
+    print("WEEKLY HOURS PREFERENCE")
+    print("1 = Any hours")
+    print("2 = Exact hours")
+    print("3 = Maximum hours")
+    print("4 = Preferred hours + maximum")
+    print("=" * 64)
+
+    while True:
+        choice = input("Select hours preference [1-4]: ").strip()
+
+        if choice == "1":
+            print("Hours preference: ANY")
+            return apply_hours_preference(base_rules, "any")
+
+        if choice == "2":
+            exact = _read_positive_hours("Exact weekly hours: ")
+            print(f"Hours preference: EXACTLY {exact:g}h")
+            return apply_hours_preference(
+                base_rules,
+                "exact",
+                exact_hours=exact,
+            )
+
+        if choice == "3":
+            maximum = _read_positive_hours("Maximum weekly hours: ")
+            print(f"Hours preference: MAXIMUM {maximum:g}h")
+            return apply_hours_preference(
+                base_rules,
+                "max",
+                max_hours=maximum,
+            )
+
+        if choice == "4":
+            preferred = _read_positive_hours("Preferred weekly hours: ")
+            maximum = _read_positive_hours("Maximum weekly hours: ")
+            if preferred > maximum:
+                print("Preferred hours cannot exceed maximum hours. Try again.")
+                continue
+            print(
+                f"Hours preference: PREFER {preferred:g}h, "
+                f"MAXIMUM {maximum:g}h"
+            )
+            return apply_hours_preference(
+                base_rules,
+                "preferred_max",
+                preferred_hours=preferred,
+                max_hours=maximum,
+            )
+
+        print("Please enter 1, 2, 3, or 4.")
+
+
+def choose_days_preference(base_rules: dict) -> dict:
+    print("\n" + "=" * 64)
+    print("DAY PREFERENCE")
+    print("1 = Any days")
+    print("2 = Choose allowed days")
+    print("3 = Choose blocked days")
+    print("=" * 64)
+
+    while True:
+        choice = input("Select day preference [1-3]: ").strip()
+
+        if choice == "1":
+            print("Day preference: ANY")
+            return apply_days_preference(base_rules, "any")
+
+        if choice in {"2", "3"}:
+            while True:
+                raw = input(
+                    "Enter days, e.g. Wed, Thu, Fri, Sat, Sun: "
+                ).strip()
+                days, invalid = normalise_user_days(raw)
+                if invalid:
+                    print("Invalid day(s): " + ", ".join(invalid))
+                    continue
+                if not days:
+                    print("Please enter at least one day.")
+                    continue
+
+                if choice == "2":
+                    print("Allowed days: " + ", ".join(days))
+                    return apply_days_preference(
+                        base_rules,
+                        "allowed",
+                        days,
+                    )
+
+                print("Blocked days: " + ", ".join(days))
+                return apply_days_preference(
+                    base_rules,
+                    "blocked",
+                    days,
+                )
+
+        print("Please enter 1, 2, or 3.")
+
+
 def choose_time_preference(base_rules: dict) -> dict:
     """Ask how the user wants Method 2 to interpret shift time."""
     print("\n" + "=" * 64)
@@ -150,6 +265,59 @@ def choose_time_preference(base_rules: dict) -> dict:
                 print("Invalid time. Example: 09:00, 13:30, 9 AM, 10:30 PM.")
 
         print("Please enter 1, 2, 3, or 4.")
+
+
+def print_filter_summary(
+    desired_locations: list[str],
+    rules: dict,
+) -> None:
+    hours = rules.get("hours_preference", {"mode": "any"})
+    days = rules.get("days_preference", {"mode": "any"})
+    time_pref = rules.get("time_preference", {"mode": "any"})
+
+    print("\n" + "=" * 64)
+    print("SEARCH FILTER SUMMARY")
+    print(
+        "Location: "
+        + (", ".join(desired_locations) if desired_locations else "ANY")
+    )
+
+    hour_mode = hours.get("mode", "any")
+    if hour_mode == "exact":
+        print(f"Hours: EXACTLY {hours['exact_hours']:g}h")
+    elif hour_mode == "max":
+        print(f"Hours: MAXIMUM {hours['max_hours']:g}h")
+    elif hour_mode == "preferred_max":
+        print(
+            f"Hours: PREFER {hours['preferred_hours']:g}h, "
+            f"MAXIMUM {hours['max_hours']:g}h"
+        )
+    else:
+        print("Hours: ANY")
+
+    day_mode = days.get("mode", "any")
+    if day_mode == "allowed":
+        print("Allowed days: " + ", ".join(days.get("days", [])))
+    elif day_mode == "blocked":
+        print("Blocked days: " + ", ".join(days.get("days", [])))
+    else:
+        print("Days: ANY")
+
+    time_mode = time_pref.get("mode", "any")
+    if time_mode == "day":
+        print("Time: DAY SHIFT")
+    elif time_mode == "night":
+        print("Time: NIGHT SHIFT")
+    elif time_mode == "window":
+        print(
+            "Time: "
+            f"{time_pref.get('earliest_start')} - "
+            f"{time_pref.get('latest_end')}"
+        )
+    else:
+        print("Time: ANY")
+
+    print("=" * 64)
 
 
 def _choose_amazon_page(browser, fallback_url: str):
@@ -558,7 +726,11 @@ def run() -> None:
     load_dotenv(ROOT / ".env")
     config = load_config()
     desired_locations = choose_desired_locations()
-    runtime_rules = choose_time_preference(config.get("rules", {}))
+
+    runtime_rules = choose_hours_preference(config.get("rules", {}))
+    runtime_rules = choose_days_preference(runtime_rules)
+    runtime_rules = choose_time_preference(runtime_rules)
+    print_filter_summary(desired_locations, runtime_rules)
 
     setup_logging()
     log = logging.getLogger("job-search-catcher")
@@ -582,6 +754,8 @@ def run() -> None:
         "Desired locations=%s",
         ", ".join(desired_locations) if desired_locations else "ANY",
     )
+    log.info("Runtime hours preference=%s", runtime_rules.get("hours_preference"))
+    log.info("Runtime days preference=%s", runtime_rules.get("days_preference"))
     log.info("Runtime time preference=%s", runtime_rules.get("time_preference"))
     log.info("Connecting to existing Brave session at %s", cdp_url)
 
