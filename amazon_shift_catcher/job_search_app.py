@@ -16,13 +16,17 @@ from .job_search_browser import (
     detect_application_stage,
     find_apply_button,
     find_open_application_tab,
+    job_candidate_key,
     normalise_location_terms,
     open_job_candidate,
     open_job_search,
     page_is_blocked,
     read_job_detail_text,
+    read_reported_job_count,
     read_warehouse_job_cards,
+    reset_job_search_scroll,
     return_to_job_search,
+    scroll_job_search_results,
     text_matches_location,
     wait_for_manual_login,
 )
@@ -189,107 +193,180 @@ def _notify(body: str, **kwargs) -> None:
 
 
 def find_desired_job(page, desired_locations: list[str], log):
-    """Use the location shown on each result card before opening any job.
+    """Scan the complete lazy-loaded result page for a desired location.
 
-    A normal card already exposes its place/location, so non-matching cards are skipped
-    without navigation. Only cards that explicitly say "multiple on site locations
-    available" are opened to inspect the detailed location.
+    Amazon can initially mount only the first couple of job cards even when the
+    page reports many results. Method 2 therefore scans the current batch,
+    scrolls down, and keeps collecting newly mounted cards until the end.
     """
-    cards = read_warehouse_job_cards(page)
-    if not cards:
-        return None
-
-    log.info("Found %s visible Warehouse Associate card(s).", len(cards))
-
-    visible_locations = [
-        candidate.location
-        for candidate in cards
-        if candidate.location
-    ]
-    added_locations = save_unique_locations(LOCATION_STORE, visible_locations)
-    if added_locations:
+    reported_total = read_reported_job_count(page)
+    if reported_total is not None:
         log.info(
-            "Saved %s new unique card location(s): %s",
-            len(added_locations),
-            ", ".join(added_locations),
+            "Amazon reports %s job(s) found. Scanning the full result page.",
+            reported_total,
         )
 
-    for index in range(len(cards)):
-        current_cards = read_warehouse_job_cards(page)
-        if index >= len(current_cards):
-            break
+    reset_job_search_scroll(page)
 
-        candidate = current_cards[index]
-        log.info(
-            "Checking Warehouse Associate card %s/%s: %s",
-            index + 1,
-            len(cards),
-            candidate.text[:350] or "<no readable card text>",
-        )
+    seen_keys = set()
+    scan_steps = 0
+    max_scan_steps = 40
+    no_new_batches = 0
 
-        visible_location_matches = text_matches_location(
-            candidate.location or candidate.text,
-            desired_locations,
-        )
+    while scan_steps < max_scan_steps:
+        cards = read_warehouse_job_cards(page)
+        new_cards = []
 
-        if visible_location_matches:
-            log.info(
-                "Desired location matched directly on the result card. "
-                "Opening this matching card only."
+        for candidate in cards:
+            key = job_candidate_key(candidate)
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            new_cards.append(candidate)
+
+        if new_cards:
+            no_new_batches = 0
+            visible_locations = [
+                candidate.location
+                for candidate in new_cards
+                if candidate.location
+            ]
+            added_locations = save_unique_locations(
+                LOCATION_STORE,
+                visible_locations,
             )
-            open_job_candidate(page, candidate)
-
-            if page_is_blocked(page):
-                raise RuntimeError("Amazon returned a 403 / request-blocked page.")
-
-            detail_text = read_job_detail_text(page)
-            apply_button = find_apply_button(page)
-            if apply_button is None:
-                log.warning(
-                    "Location matched, but no visible Apply button was found on the details page."
+            if added_locations:
+                log.info(
+                    "Saved %s new unique card location(s): %s",
+                    len(added_locations),
+                    ", ".join(added_locations),
                 )
-            return {
-                "card_text": candidate.text,
-                "detail_text": detail_text,
-                "apply_visible": apply_button is not None,
-                "url": page.url,
-            }
 
-        if not card_requires_detail_location_check(candidate.text):
             log.info(
-                "Visible card location does not match. Skipping this card without opening it."
+                "Discovered %s new Warehouse Associate card(s); "
+                "%s unique card(s) checked/discovered so far.",
+                len(new_cards),
+                len(seen_keys),
             )
+
+            restart_scan = False
+
+            for candidate in new_cards:
+                card_number = len(seen_keys) - len(new_cards) + new_cards.index(candidate) + 1
+                total_label = str(reported_total) if reported_total is not None else "?"
+                log.info(
+                    "Checking Warehouse Associate card %s/%s: %s",
+                    card_number,
+                    total_label,
+                    candidate.text[:350] or "<no readable card text>",
+                )
+
+                visible_location_matches = text_matches_location(
+                    candidate.location or candidate.text,
+                    desired_locations,
+                )
+
+                if visible_location_matches:
+                    log.info(
+                        "Desired location matched directly on the result card. "
+                        "Opening this matching card only."
+                    )
+                    open_job_candidate(page, candidate)
+
+                    if page_is_blocked(page):
+                        raise RuntimeError(
+                            "Amazon returned a 403 / request-blocked page."
+                        )
+
+                    detail_text = read_job_detail_text(page)
+                    apply_button = find_apply_button(page)
+                    if apply_button is None:
+                        log.warning(
+                            "Location matched, but no visible Apply button was "
+                            "found on the details page."
+                        )
+                    return {
+                        "card_text": candidate.text,
+                        "detail_text": detail_text,
+                        "apply_visible": apply_button is not None,
+                        "url": page.url,
+                    }
+
+                if not card_requires_detail_location_check(candidate.text):
+                    log.info(
+                        "Visible card location does not match. "
+                        "Skipping this card without opening it."
+                    )
+                    continue
+
+                log.info(
+                    "Card says multiple on site locations available. "
+                    "Opening it to check the detailed location."
+                )
+                open_job_candidate(page, candidate)
+
+                if page_is_blocked(page):
+                    raise RuntimeError(
+                        "Amazon returned a 403 / request-blocked page."
+                    )
+
+                detail_text = read_job_detail_text(page)
+                if text_matches_location(detail_text, desired_locations):
+                    apply_button = find_apply_button(page)
+                    if apply_button is None:
+                        log.warning(
+                            "Detailed location matched, but no visible Apply "
+                            "button was found."
+                        )
+                    return {
+                        "card_text": candidate.text,
+                        "detail_text": detail_text,
+                        "apply_visible": apply_button is not None,
+                        "url": page.url,
+                    }
+
+                log.info(
+                    "Detailed location did not match this multiple-location card. "
+                    "Returning to search results and continuing the full scan."
+                )
+                return_to_job_search(page)
+                reset_job_search_scroll(page)
+                restart_scan = True
+                break
+
+            if restart_scan:
+                scan_steps += 1
+                continue
+
+        else:
+            no_new_batches += 1
+
+        moved = scroll_job_search_results(page)
+        scan_steps += 1
+
+        if moved:
             continue
 
-        log.info(
-            "Card says multiple on site locations available. "
-            "Opening it to check the detailed location."
-        )
-        open_job_candidate(page, candidate)
+        # At the bottom, give lazy loading one extra moment before deciding the
+        # scan is complete.
+        time.sleep(0.5)
+        final_cards = read_warehouse_job_cards(page)
+        final_new = [
+            candidate
+            for candidate in final_cards
+            if job_candidate_key(candidate) not in seen_keys
+        ]
+        if final_new:
+            continue
 
-        if page_is_blocked(page):
-            raise RuntimeError("Amazon returned a 403 / request-blocked page.")
+        if no_new_batches >= 1 or not moved:
+            break
 
-        detail_text = read_job_detail_text(page)
-        if text_matches_location(detail_text, desired_locations):
-            apply_button = find_apply_button(page)
-            if apply_button is None:
-                log.warning(
-                    "Detailed location matched, but no visible Apply button was found."
-                )
-            return {
-                "card_text": candidate.text,
-                "detail_text": detail_text,
-                "apply_visible": apply_button is not None,
-                "url": page.url,
-            }
-
-        log.info(
-            "Detailed location did not match this multiple-location card. "
-            "Returning to search results."
-        )
-        return_to_job_search(page)
-
+    log.info(
+        "Finished full result-page scan. %s unique Warehouse Associate card(s) "
+        "were discovered and checked.",
+        len(seen_keys),
+    )
     return None
 
 
