@@ -48,6 +48,30 @@ class JobSearchMethodTests(unittest.TestCase):
             "Dartford, Kent DA1 1AA",
         )
 
+    def test_extract_job_detail_location_from_postcode_line(self):
+        raw = (
+            "Warehouse Associate\n"
+            "Fixed-term role\n"
+            "Unit 3 Crossways Business Park, Dartford, Kent DA2 6DT\n"
+            "Apply\n"
+        )
+        self.assertEqual(
+            extract_job_detail_location(raw),
+            "Unit 3 Crossways Business Park, Dartford, Kent DA2 6DT",
+        )
+
+    def test_extract_job_detail_location_from_city_region_line(self):
+        raw = (
+            "Warehouse Associate\n"
+            "Full Time\n"
+            "Dartford, England\n"
+            "Apply\n"
+        )
+        self.assertEqual(
+            extract_job_detail_location(raw),
+            "Dartford, England",
+        )
+
     def test_location_terms_are_trimmed_and_deduplicated(self):
         self.assertEqual(
             normalise_location_terms(" Wembley, DA1, wembley , Croydon "),
