@@ -159,6 +159,37 @@ class JobSearchMethodTests(unittest.TestCase):
             "SHIFT_SELECTION",
         )
 
+    def test_additional_information_with_schedule_is_post_shift(self):
+        class DummyLocator:
+            def count(self):
+                return 0
+
+            def nth(self, index):
+                return self
+
+            def is_visible(self):
+                return False
+
+            def filter(self, has_text=None):
+                return self
+
+            def inner_text(self, timeout=3000):
+                return ""
+
+        class DummyPage:
+            url = (
+                "https://www.jobsatamazon.co.uk/application/uk/"
+                "#/additional-information?applicationId=abc&scheduleId=SCH-123"
+            )
+
+            def locator(self, selector):
+                return DummyLocator()
+
+            def get_by_role(self, *args, **kwargs):
+                return DummyLocator()
+
+        self.assertEqual(detect_application_stage(DummyPage()), "POST_SHIFT")
+
     def test_parse_method2_shift_card(self):
         raw = (
             "Start Date: Monday, 16 Oct 2026\n"
