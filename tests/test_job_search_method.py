@@ -8,6 +8,7 @@ from amazon_shift_catcher.job_search_browser import (
     card_requires_detail_location_check,
     detect_application_stage,
     extract_card_location,
+    extract_job_detail_location,
     extract_reported_job_count,
     location_match_rank,
     normalise_location_terms,
@@ -33,6 +34,19 @@ class JobSearchMethodTests(unittest.TestCase):
         self.assertEqual(extract_reported_job_count("20 jobs found"), 20)
         self.assertEqual(extract_reported_job_count("1 job found"), 1)
         self.assertIsNone(extract_reported_job_count("Jobs available"))
+
+    def test_extract_job_detail_location(self):
+        raw = (
+            "Warehouse Associate\n"
+            "Type: Full Time\n"
+            "Work address:\n"
+            "Dartford, Kent DA1 1AA\n"
+            "Apply\n"
+        )
+        self.assertEqual(
+            extract_job_detail_location(raw),
+            "Dartford, Kent DA1 1AA",
+        )
 
     def test_location_terms_are_trimmed_and_deduplicated(self):
         self.assertEqual(
