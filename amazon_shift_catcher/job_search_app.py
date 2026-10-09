@@ -34,7 +34,9 @@ from .job_search_shifts import (
     apply_days_preference,
     apply_hours_preference,
     apply_time_preference,
+    click_select_this_job,
     evaluate_shift_opportunity,
+    find_accept_offer_button,
     find_select_this_job_button,
     normalise_user_days,
     normalise_user_time,
@@ -60,6 +62,7 @@ class JobSearchState(str, Enum):
     SHIFT_SELECTION = "SHIFT_SELECTION"
     SHIFT_REVIEW = "SHIFT_REVIEW"
     SHIFT_DETAILS = "SHIFT_DETAILS"
+    JOB_SELECTED = "JOB_SELECTED"
     SECURITY_CHECK = "SECURITY_CHECK"
     BLOCKED = "BLOCKED"
     ERROR = "ERROR"
@@ -888,19 +891,44 @@ def run() -> None:
                                     "'Select this job' button was not found."
                                 )
 
+                            log.warning(
+                                "Automatically clicking 'Select this job' once. "
+                                "The program will stop before 'Accept offer'."
+                            )
+                            selected = click_select_this_job(page)
+                            if not selected:
+                                raise RuntimeError(
+                                    "'Select this job' was clicked, but the "
+                                    "'Accept offer' page was not confirmed."
+                                )
+
+                            state = JobSearchState.JOB_SELECTED
+                            _save_screenshot(
+                                page,
+                                "job-search-after-select-this-job",
+                                log,
+                            )
+
+                            if find_accept_offer_button(page) is None:
+                                raise RuntimeError(
+                                    "Job selection advanced, but the "
+                                    "'Accept offer' button was not found."
+                                )
+
                             print(
-                                "\nBEST MATCHING SHIFT OPENED. "
-                                "The program has stopped before 'Select this job'."
+                                "\n'SELECT THIS JOB' CLICKED AUTOMATICALLY. "
+                                "The program has stopped before 'Accept offer'."
                             )
                             _notify(
-                                "Best matching Amazon shift has been opened. "
-                                "The program stopped before clicking 'Select this job'.",
-                                title="AMAZON BEST SHIFT READY",
+                                "Best matching Amazon shift was selected with "
+                                "'Select this job'. The program stopped before "
+                                "'Accept offer'.",
+                                title="AMAZON SHIFT SELECTED",
                                 priority=5,
                             )
                             stop_reason = (
-                                "best matching shift opened; "
-                                "Select this job awaiting user"
+                                "Select this job clicked; "
+                                "Accept offer awaiting user"
                             )
                         else:
                             _notify(
