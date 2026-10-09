@@ -73,40 +73,131 @@ def job_candidate_key(candidate: JobCandidate) -> str:
 
 
 def reset_job_search_scroll(page: Page) -> None:
-    """Return the result page to the top before a full scan."""
+    """Return Amazon's job-result page and any inner result scroller to the top."""
     try:
-        page.evaluate("window.scrollTo(0, 0)")
-        page.wait_for_timeout(150)
+        page.evaluate(
+            """() => {
+                const nodes = [
+                    document.scrollingElement,
+                    ...document.querySelectorAll(
+                        'main, [role="main"], section, div, ul'
+                    )
+                ].filter(Boolean);
+
+                const seen = new Set();
+                for (const node of nodes) {
+                    if (seen.has(node)) continue;
+                    seen.add(node);
+
+                    const text = (node.innerText || '').toLowerCase();
+                    const scrollable =
+                        node.scrollHeight > node.clientHeight + 40;
+
+                    if (
+                        node === document.scrollingElement ||
+                        (scrollable && text.includes('warehouse associate'))
+                    ) {
+                        node.scrollTop = 0;
+                    }
+                }
+                window.scrollTo(0, 0);
+            }"""
+        )
+        page.wait_for_timeout(200)
     except Exception:
         pass
 
 
 def scroll_job_search_results(page: Page) -> bool:
-    """Scroll one viewport through Amazon's lazy-loaded job results.
+    """Scroll Amazon's actual job-result container by one viewport.
 
-    Returns True when the page moved. Amazon currently uses the main document
-    scrollbar for this result list, so repeated calls expose cards that are not
-    mounted in the DOM at the top of the page.
+    Amazon can place the cards inside an inner scrollable container instead of
+    the document scrollbar. Search every plausible scroll container, prioritize
+    one containing Warehouse Associate results, and move the first one that still
+    has content below it.
     """
     try:
         result = page.evaluate(
             """() => {
                 const root = document.scrollingElement || document.documentElement;
-                const before = root.scrollTop;
-                const step = Math.max(Math.floor(window.innerHeight * 0.80), 500);
-                root.scrollTop = Math.min(
-                    root.scrollTop + step,
-                    Math.max(0, root.scrollHeight - root.clientHeight)
-                );
-                return {
-                    before,
-                    after: root.scrollTop,
-                    max: Math.max(0, root.scrollHeight - root.clientHeight)
-                };
+                const rawNodes = [
+                    root,
+                    ...document.querySelectorAll(
+                        'main, [role="main"], section, div, ul'
+                    )
+                ].filter(Boolean);
+
+                const seen = new Set();
+                const candidates = [];
+
+                for (const node of rawNodes) {
+                    if (seen.has(node)) continue;
+                    seen.add(node);
+
+                    const clientHeight = node.clientHeight || 0;
+                    const scrollHeight = node.scrollHeight || 0;
+                    const max = Math.max(0, scrollHeight - clientHeight);
+                    const before = node.scrollTop || 0;
+                    const remaining = Math.max(0, max - before);
+
+                    if (clientHeight < 120 || max < 40 || remaining < 5) {
+                        continue;
+                    }
+
+                    const text = (node.innerText || '').toLowerCase();
+                    let score = remaining;
+
+                    if (text.includes('warehouse associate')) {
+                        score += 1000000;
+                    }
+                    if (/\d+\s+jobs?\s+found/i.test(text)) {
+                        score += 500000;
+                    }
+                    if (node === root) {
+                        score += 1000;
+                    }
+
+                    candidates.push({
+                        node,
+                        before,
+                        max,
+                        remaining,
+                        clientHeight,
+                        score
+                    });
+                }
+
+                candidates.sort((a, b) => b.score - a.score);
+
+                for (const candidate of candidates) {
+                    const step = Math.max(
+                        Math.floor(candidate.clientHeight * 0.80),
+                        450
+                    );
+                    const target = Math.min(
+                        candidate.before + step,
+                        candidate.max
+                    );
+
+                    candidate.node.scrollTop = target;
+                    const after = candidate.node.scrollTop || 0;
+
+                    if (after > candidate.before) {
+                        return {
+                            moved: true,
+                            before: candidate.before,
+                            after,
+                            max: candidate.max,
+                            remaining: Math.max(0, candidate.max - after)
+                        };
+                    }
+                }
+
+                return {moved: false};
             }"""
         )
-        page.wait_for_timeout(300)
-        return bool(result and result.get("after", 0) > result.get("before", 0))
+        page.wait_for_timeout(450)
+        return bool(result and result.get("moved"))
     except Exception:
         return False
 
