@@ -551,18 +551,20 @@ def detect_application_stage(page: Page) -> str:
     if page_has_security_challenge(page):
         return "SECURITY_CHECK"
 
-    # If Amazon resumes an application that already has a schedule attached,
-    # do not mistake its later "Next" button for the pre-consent "Next".
     try:
         url = page.url.lower()
     except Exception:
         url = ""
 
-    if "#/additional-information" in url and "scheduleid=" in url:
-        return "POST_SHIFT"
+    # Amazon uses /nhe for the New Hire Event / pre-hire appointment stage.
+    # Detect it before generic button matching so this page is never treated as
+    # an unknown application state.
+    if "#/nhe" in url:
+        return "APPOINTMENT_SELECTION"
 
-    # Prefer visible action buttons over generic page text. This prevents the
-    # job-details page from being mistaken for shift selection.
+    # Prefer visible action buttons over generic page text. This lets the
+    # post-offer Additional Information page use its own visible Next button,
+    # even when a scheduleId is already present in the URL.
     if find_continue_button(page) is not None:
         return "CONTINUE"
     if find_start_application_button(page) is not None:
@@ -573,6 +575,10 @@ def detect_application_stage(page: Page) -> str:
         return "APPLY"
     if shift_selection_page_visible(page):
         return "SHIFT_SELECTION"
+
+    if "#/additional-information" in url and "scheduleid=" in url:
+        return "POST_SHIFT"
+
     return "UNKNOWN"
 
 
