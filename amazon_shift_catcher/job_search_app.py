@@ -40,6 +40,7 @@ from .job_search_shifts import (
     evaluate_shift_opportunity,
     find_accept_offer_button,
     find_select_this_job_button,
+    focus_accept_offer_button,
     normalise_user_days,
     normalise_user_time,
     open_shift_opportunity,
@@ -992,9 +993,15 @@ def run() -> None:
                                     "'Accept offer' button was not found."
                                 )
 
+                            if not focus_accept_offer_button(page):
+                                raise RuntimeError(
+                                    "The 'Accept offer' button was found, but "
+                                    "could not be brought into view."
+                                )
+
                             print(
                                 "\n'SELECT THIS JOB' CLICKED AUTOMATICALLY. "
-                                "The program has stopped before 'Accept offer'."
+                                "'Accept offer' has been brought into view and focused."
                             )
                             _notify(
                                 "Best matching Amazon shift was selected with "
