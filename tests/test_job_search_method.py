@@ -25,6 +25,7 @@ from amazon_shift_catcher.job_search_shifts import (
     parse_shift_opportunity,
 )
 from amazon_shift_catcher.location_storage import load_locations, save_unique_locations
+from amazon_shift_catcher.job_search_app import _unchecked_job_candidates
 
 
 class JobSearchMethodTests(unittest.TestCase):
@@ -38,6 +39,31 @@ class JobSearchMethodTests(unittest.TestCase):
             normalise_location_terms(" Wembley, DA1, wembley , Croydon "),
             ["Wembley", "DA1", "Croydon"],
         )
+
+    def test_unchecked_candidates_are_not_pre_marked(self):
+        class DummyCandidate:
+            def __init__(self, key):
+                self.key = key
+                self.text = key
+                self.location = None
+
+        from amazon_shift_catcher import job_search_app as app_module
+
+        original = app_module.job_candidate_key
+        app_module.job_candidate_key = lambda candidate: candidate.key
+        try:
+            checked = {"a"}
+            cards = [
+                DummyCandidate("a"),
+                DummyCandidate("b"),
+                DummyCandidate("c"),
+                DummyCandidate("c"),
+            ]
+            result = _unchecked_job_candidates(cards, checked)
+            self.assertEqual([item.key for item in result], ["b", "c"])
+            self.assertEqual(checked, {"a"})
+        finally:
+            app_module.job_candidate_key = original
 
     def test_location_priority_rank_uses_entered_order(self):
         locations = ["Dunfermline", "Portadown", "Motherwell"]
