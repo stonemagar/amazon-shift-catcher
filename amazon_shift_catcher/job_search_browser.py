@@ -410,6 +410,33 @@ def find_continue_button(page: Page):
     return _find_visible_button(page, CONTINUE_RE)
 
 
+def find_confirm_selection_button(page: Page):
+    return _find_visible_button(page, CONFIRM_SELECTION_RE)
+
+
+def find_submit_application_button(page: Page):
+    return _find_visible_button(page, SUBMIT_APPLICATION_RE)
+
+
+def click_confirm_selection(page: Page, timeout_seconds: float = 8.0) -> bool:
+    button = find_confirm_selection_button(page)
+    if button is None:
+        return False
+
+    try:
+        button.click(timeout=5000)
+    except Exception:
+        return False
+
+    deadline = time.monotonic() + max(1.0, timeout_seconds)
+    while time.monotonic() < deadline:
+        if find_submit_application_button(page) is not None:
+            return True
+        time.sleep(0.15)
+
+    return False
+
+
 def find_open_application_tab(page: Page):
     """Return the newest open Amazon application tab in this browser context."""
     try:
@@ -559,6 +586,9 @@ def detect_application_stage(page: Page) -> str:
     # Amazon uses /nhe for the New Hire Event / pre-hire appointment stage.
     # Detect it before generic button matching so this page is never treated as
     # an unknown application state.
+    if find_submit_application_button(page) is not None:
+        return "SUBMIT_APPLICATION"
+
     if "#/nhe" in url:
         return "APPOINTMENT_SELECTION"
 
