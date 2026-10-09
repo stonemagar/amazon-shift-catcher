@@ -63,6 +63,7 @@ class JobSearchState(str, Enum):
     SHIFT_REVIEW = "SHIFT_REVIEW"
     SHIFT_DETAILS = "SHIFT_DETAILS"
     JOB_SELECTED = "JOB_SELECTED"
+    APPOINTMENT_SELECTION = "APPOINTMENT_SELECTION"
     SECURITY_CHECK = "SECURITY_CHECK"
     BLOCKED = "BLOCKED"
     ERROR = "ERROR"
@@ -604,6 +605,10 @@ def advance_to_shift_selection(page, log):
             log.info("Shift-selection page reached.")
             return page
 
+        if stage == "APPOINTMENT_SELECTION":
+            log.info("Pre-hire appointment selection page reached.")
+            return page
+
         if stage == "SECURITY_CHECK":
             raise RuntimeError(
                 "Amazon security/verification step detected. "
@@ -864,6 +869,35 @@ def run() -> None:
                     application_page = advance_to_shift_selection(page, log)
                     if application_page is not None:
                         page = application_page
+                        destination_stage = detect_application_stage(page)
+
+                        if destination_stage == "APPOINTMENT_SELECTION":
+                            state = JobSearchState.APPOINTMENT_SELECTION
+                            _save_screenshot(
+                                page,
+                                "job-search-prehire-appointment",
+                                log,
+                            )
+                            print(
+                                "\nPRE-HIRE APPOINTMENT PAGE REACHED."
+                            )
+                            print(
+                                "The program has stopped before choosing or "
+                                "confirming an appointment."
+                            )
+                            _notify(
+                                "Amazon pre-hire appointment page reached. "
+                                "The program stopped before choosing or confirming "
+                                "an appointment.",
+                                title="AMAZON APPOINTMENT PAGE READY",
+                                priority=5,
+                            )
+                            stop_reason = (
+                                "pre-hire appointment page reached; "
+                                "appointment selection awaiting user"
+                            )
+                            break
+
                         state = JobSearchState.SHIFT_SELECTION
                         _save_screenshot(page, "job-search-shift-selection", log)
 
