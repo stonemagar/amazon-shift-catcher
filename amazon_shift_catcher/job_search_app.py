@@ -19,6 +19,7 @@ from .job_search_browser import (
     find_open_application_tab,
     find_submit_application_button,
     job_candidate_key,
+    location_match_rank,
     normalise_location_terms,
     open_job_candidate,
     open_job_search,
@@ -115,6 +116,32 @@ def choose_desired_locations() -> list[str]:
 
     return selected
 
+
+
+def choose_location_strategy(desired_locations: list[str]) -> str:
+    """Choose how Method 2 handles more than one requested location."""
+    if len(desired_locations) <= 1:
+        return "first"
+
+    print("\n" + "=" * 64)
+    print("MULTI-LOCATION SELECTION")
+    print("1 = Fastest: use the first matching location found")
+    print("2 = Priority: prefer locations in the order you entered them")
+    print("=" * 64)
+
+    while True:
+        choice = input("Select location strategy [1-2]: ").strip()
+        if choice == "1":
+            print("Location strategy: FIRST MATCH")
+            return "first"
+        if choice == "2":
+            print(
+                "Location strategy: PRIORITY ORDER ("
+                + " > ".join(desired_locations)
+                + ")"
+            )
+            return "priority"
+        print("Please enter 1 or 2.")
 
 
 def _read_positive_hours(prompt: str) -> float:
@@ -281,6 +308,7 @@ def choose_time_preference(base_rules: dict) -> dict:
 def print_filter_summary(
     desired_locations: list[str],
     rules: dict,
+    location_strategy: str = "first",
 ) -> None:
     hours = rules.get("hours_preference", {"mode": "any"})
     days = rules.get("days_preference", {"mode": "any"})
@@ -292,6 +320,12 @@ def print_filter_summary(
         "Location: "
         + (", ".join(desired_locations) if desired_locations else "ANY")
     )
+
+    if len(desired_locations) > 1:
+        if location_strategy == "priority":
+            print("Location selection: PRIORITY ORDER")
+        else:
+            print("Location selection: FIRST MATCH")
 
     hour_mode = hours.get("mode", "any")
     if hour_mode == "exact":
@@ -371,12 +405,71 @@ def _notify(body: str, **kwargs) -> None:
         pass
 
 
-def find_desired_job(page, desired_locations: list[str], log):
-    """Scan the complete lazy-loaded result page for a desired location.
+def _find_candidate_by_key(page, wanted_key: str):
+    """Re-find a lazy-loaded job card by its stable key."""
+    reset_job_search_scroll(page)
 
-    Amazon can initially mount only the first couple of job cards even when the
-    page reports many results. Method 2 therefore scans the current batch,
-    scrolls down, and keeps collecting newly mounted cards until the end.
+    for _step in range(40):
+        for candidate in read_warehouse_job_cards(page):
+            if job_candidate_key(candidate) == wanted_key:
+                return candidate
+
+        if not scroll_job_search_results(page):
+            time.sleep(0.35)
+            for candidate in read_warehouse_job_cards(page):
+                if job_candidate_key(candidate) == wanted_key:
+                    return candidate
+            break
+
+    return None
+
+
+def _open_ranked_job_match(page, match: dict, log):
+    candidate = _find_candidate_by_key(page, match["key"])
+    if candidate is None:
+        log.warning(
+            "A preferred matching job was discovered, but its card could not "
+            "be re-located after the full result scan."
+        )
+        return None
+
+    log.info(
+        "Opening selected location match: %s",
+        candidate.location or candidate.text[:220],
+    )
+    open_job_candidate(page, candidate)
+
+    if page_is_blocked(page):
+        raise RuntimeError("Amazon returned a 403 / request-blocked page.")
+
+    detail_text = read_job_detail_text(page)
+    apply_button = find_apply_button(page)
+    if apply_button is None:
+        log.warning(
+            "Location matched, but no visible Apply button was found "
+            "on the details page."
+        )
+
+    return {
+        "card_text": candidate.text,
+        "detail_text": detail_text or match.get("detail_text", ""),
+        "apply_visible": apply_button is not None,
+        "url": page.url,
+    }
+
+
+def find_desired_job(
+    page,
+    desired_locations: list[str],
+    log,
+    location_strategy: str = "first",
+):
+    """Scan Warehouse Associate cards and choose a matching location.
+
+    'first' preserves the fastest behavior: the first matching card wins.
+    'priority' scans the result set and prefers locations in the exact order
+    entered by the user. A rank-0 match can be opened immediately because no
+    lower-priority result can beat it.
     """
     reported_total = read_reported_job_count(page)
     if reported_total is not None:
@@ -391,6 +484,7 @@ def find_desired_job(page, desired_locations: list[str], log):
     scan_steps = 0
     max_scan_steps = 40
     no_new_batches = 0
+    best_match = None
 
     while scan_steps < max_scan_steps:
         cards = read_warehouse_job_cards(page)
@@ -430,9 +524,13 @@ def find_desired_job(page, desired_locations: list[str], log):
 
             restart_scan = False
 
-            for candidate in new_cards:
-                card_number = len(seen_keys) - len(new_cards) + new_cards.index(candidate) + 1
-                total_label = str(reported_total) if reported_total is not None else "?"
+            for offset, candidate in enumerate(new_cards):
+                card_number = len(seen_keys) - len(new_cards) + offset + 1
+                total_label = (
+                    str(reported_total)
+                    if reported_total is not None
+                    else "?"
+                )
                 log.info(
                     "Checking Warehouse Associate card %s/%s: %s",
                     card_number,
@@ -440,36 +538,56 @@ def find_desired_job(page, desired_locations: list[str], log):
                     candidate.text[:350] or "<no readable card text>",
                 )
 
-                visible_location_matches = text_matches_location(
-                    candidate.location or candidate.text,
+                location_text = candidate.location or candidate.text
+                match_rank = location_match_rank(
+                    location_text,
                     desired_locations,
                 )
 
-                if visible_location_matches:
-                    log.info(
-                        "Desired location matched directly on the result card. "
-                        "Opening this matching card only."
-                    )
-                    open_job_candidate(page, candidate)
-
-                    if page_is_blocked(page):
-                        raise RuntimeError(
-                            "Amazon returned a 403 / request-blocked page."
+                if match_rank is not None:
+                    if location_strategy != "priority" or match_rank == 0:
+                        log.info(
+                            "Desired location matched directly on the result "
+                            "card. Opening this match."
                         )
+                        open_job_candidate(page, candidate)
 
-                    detail_text = read_job_detail_text(page)
-                    apply_button = find_apply_button(page)
-                    if apply_button is None:
-                        log.warning(
-                            "Location matched, but no visible Apply button was "
-                            "found on the details page."
+                        if page_is_blocked(page):
+                            raise RuntimeError(
+                                "Amazon returned a 403 / request-blocked page."
+                            )
+
+                        detail_text = read_job_detail_text(page)
+                        apply_button = find_apply_button(page)
+                        if apply_button is None:
+                            log.warning(
+                                "Location matched, but no visible Apply button "
+                                "was found on the details page."
+                            )
+                        return {
+                            "card_text": candidate.text,
+                            "detail_text": detail_text,
+                            "apply_visible": apply_button is not None,
+                            "url": page.url,
+                        }
+
+                    if (
+                        best_match is None
+                        or match_rank < best_match["rank"]
+                    ):
+                        best_match = {
+                            "key": job_candidate_key(candidate),
+                            "rank": match_rank,
+                            "detail_text": "",
+                        }
+                        log.info(
+                            "Stored current best location match: %s "
+                            "(priority %s). Continuing scan for a higher "
+                            "priority location.",
+                            candidate.location or candidate.text[:120],
+                            match_rank + 1,
                         )
-                    return {
-                        "card_text": candidate.text,
-                        "detail_text": detail_text,
-                        "apply_visible": apply_button is not None,
-                        "url": page.url,
-                    }
+                    continue
 
                 if not card_requires_detail_location_check(candidate.text):
                     log.info(
@@ -482,6 +600,7 @@ def find_desired_job(page, desired_locations: list[str], log):
                     "Card says multiple on site locations available. "
                     "Opening it to check the detailed location."
                 )
+                key = job_candidate_key(candidate)
                 open_job_candidate(page, candidate)
 
                 if page_is_blocked(page):
@@ -490,22 +609,42 @@ def find_desired_job(page, desired_locations: list[str], log):
                     )
 
                 detail_text = read_job_detail_text(page)
-                if text_matches_location(detail_text, desired_locations):
-                    apply_button = find_apply_button(page)
-                    if apply_button is None:
-                        log.warning(
-                            "Detailed location matched, but no visible Apply "
-                            "button was found."
+                detail_rank = location_match_rank(
+                    detail_text,
+                    desired_locations,
+                )
+
+                if detail_rank is not None:
+                    if location_strategy != "priority" or detail_rank == 0:
+                        apply_button = find_apply_button(page)
+                        if apply_button is None:
+                            log.warning(
+                                "Detailed location matched, but no visible Apply "
+                                "button was found."
+                            )
+                        return {
+                            "card_text": candidate.text,
+                            "detail_text": detail_text,
+                            "apply_visible": apply_button is not None,
+                            "url": page.url,
+                        }
+
+                    if (
+                        best_match is None
+                        or detail_rank < best_match["rank"]
+                    ):
+                        best_match = {
+                            "key": key,
+                            "rank": detail_rank,
+                            "detail_text": detail_text,
+                        }
+                        log.info(
+                            "Stored current best detailed location match at "
+                            "priority %s. Continuing scan.",
+                            detail_rank + 1,
                         )
-                    return {
-                        "card_text": candidate.text,
-                        "detail_text": detail_text,
-                        "apply_visible": apply_button is not None,
-                        "url": page.url,
-                    }
 
                 log.info(
-                    "Detailed location did not match this multiple-location card. "
                     "Returning to search results and continuing the full scan."
                 )
                 return_to_job_search(page)
@@ -526,8 +665,6 @@ def find_desired_job(page, desired_locations: list[str], log):
         if moved:
             continue
 
-        # At the bottom, give lazy loading one extra moment before deciding the
-        # scan is complete.
         time.sleep(0.5)
         final_cards = read_warehouse_job_cards(page)
         final_new = [
@@ -546,6 +683,16 @@ def find_desired_job(page, desired_locations: list[str], log):
         "were discovered and checked.",
         len(seen_keys),
     )
+
+    if best_match is not None:
+        selected_location = desired_locations[best_match["rank"]]
+        log.info(
+            "Full scan complete. Choosing highest-priority discovered "
+            "location match: %s",
+            selected_location,
+        )
+        return _open_ranked_job_match(page, best_match, log)
+
     if reported_total is not None and len(seen_keys) < reported_total:
         log.warning(
             "Amazon reports %s total job result(s), but %s Warehouse Associate "
@@ -756,11 +903,16 @@ def run() -> None:
     load_dotenv(ROOT / ".env")
     config = load_config()
     desired_locations = choose_desired_locations()
+    location_strategy = choose_location_strategy(desired_locations)
 
     runtime_rules = choose_hours_preference(config.get("rules", {}))
     runtime_rules = choose_days_preference(runtime_rules)
     runtime_rules = choose_time_preference(runtime_rules)
-    print_filter_summary(desired_locations, runtime_rules)
+    print_filter_summary(
+        desired_locations,
+        runtime_rules,
+        location_strategy,
+    )
 
     setup_logging()
     log = logging.getLogger("job-search-catcher")
@@ -784,6 +936,7 @@ def run() -> None:
         "Desired locations=%s",
         ", ".join(desired_locations) if desired_locations else "ANY",
     )
+    log.info("Location strategy=%s", location_strategy)
     log.info("Runtime hours preference=%s", runtime_rules.get("hours_preference"))
     log.info("Runtime days preference=%s", runtime_rules.get("days_preference"))
     log.info("Runtime time preference=%s", runtime_rules.get("time_preference"))
@@ -835,7 +988,12 @@ def run() -> None:
                     break
 
                 state = JobSearchState.CHECKING_JOB
-                match = find_desired_job(page, desired_locations, log)
+                match = find_desired_job(
+                    page,
+                    desired_locations,
+                    log,
+                    location_strategy,
+                )
 
                 if match is not None:
                     state = JobSearchState.JOB_FOUND
