@@ -16,6 +16,7 @@ from amazon_shift_catcher.job_search_shifts import (
     apply_hours_preference,
     apply_time_preference,
     evaluate_shift_opportunity,
+    find_select_this_job_button,
     normalise_user_days,
     normalise_user_time,
     parse_shift_opportunity,
@@ -244,6 +245,36 @@ class JobSearchMethodTests(unittest.TestCase):
 
         _days, invalid = normalise_user_days("Wed, Funday")
         self.assertEqual(invalid, ["Funday"])
+
+    def test_find_select_this_job_button(self):
+        class DummyItem:
+            def __init__(self, visible):
+                self.visible = visible
+
+            def is_visible(self):
+                return self.visible
+
+        class DummyLocator:
+            def __init__(self, visible=False):
+                self.visible = visible
+
+            def count(self):
+                return 1 if self.visible else 0
+
+            def nth(self, _index):
+                return DummyItem(self.visible)
+
+            def filter(self, has_text=None):
+                return self
+
+        class DummyPage:
+            def get_by_role(self, *args, **kwargs):
+                return DummyLocator(True)
+
+            def locator(self, _selector):
+                return DummyLocator(False)
+
+        self.assertIsNotNone(find_select_this_job_button(DummyPage()))
 
     def test_method2_time_preference_modes(self):
         day_shift = parse_shift_opportunity(
