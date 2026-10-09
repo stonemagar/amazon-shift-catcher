@@ -204,6 +204,128 @@ def scroll_job_search_results(page: Page) -> bool:
         return False
 
 
+def _visible_pagination_control(page: Page, pattern: re.Pattern):
+    """Find a visible pagination button/link matching an exact label."""
+    candidates = [
+        page.get_by_role("button", name=pattern),
+        page.get_by_role("link", name=pattern),
+        page.locator("button, a, [role='button']").filter(has_text=pattern),
+    ]
+
+    for locator in candidates:
+        item = _visible_first(locator)
+        if item is None:
+            continue
+        try:
+            disabled = item.get_attribute("disabled")
+            aria_disabled = item.get_attribute("aria-disabled")
+            if disabled is not None or str(aria_disabled).lower() == "true":
+                continue
+        except Exception:
+            pass
+        return item
+
+    return None
+
+
+def go_to_job_results_page(page: Page, target_page: int) -> bool:
+    """Navigate Amazon result pagination to one numbered page.
+
+    The current site renders pagination near the footer (for example 1, 2, >).
+    Scroll result containers to their end first so the pager is mounted/visible,
+    then click the requested page number.
+    """
+    if target_page < 1:
+        return False
+
+    # Pagination is below the result list. Move all the way down first.
+    for _ in range(30):
+        if not scroll_job_search_results(page):
+            break
+
+    try:
+        page.evaluate(
+            "() => window.scrollTo(0, document.documentElement.scrollHeight)"
+        )
+        page.wait_for_timeout(200)
+    except Exception:
+        pass
+
+    pattern = re.compile(rf"^\s*{target_page}\s*$")
+    control = _visible_pagination_control(page, pattern)
+    if control is None:
+        return False
+
+    try:
+        # Avoid clicking the already-active page if the site exposes state.
+        if (
+            str(control.get_attribute("aria-current")).lower() == "page"
+            or str(control.get_attribute("aria-selected")).lower() == "true"
+        ):
+            reset_job_search_scroll(page)
+            return True
+    except Exception:
+        pass
+
+    try:
+        control.click(timeout=5000)
+    except Exception:
+        return False
+
+    # Give the SPA time to replace its cards, then return to the top.
+    try:
+        page.wait_for_timeout(700)
+    except Exception:
+        time.sleep(0.7)
+
+    reset_job_search_scroll(page)
+    return True
+
+
+def go_to_next_job_results_page(page: Page, current_page: int) -> bool:
+    """Move to the next numbered Amazon result page when pagination exists."""
+    if go_to_job_results_page(page, current_page + 1):
+        return True
+
+    # Fallback for pagers that expose only a Next/arrow control.
+    for pattern in (
+        re.compile(r"^\s*Next\s*$", re.I),
+        re.compile(r"^\s*[>›»]\s*$"),
+    ):
+        control = _visible_pagination_control(page, pattern)
+        if control is None:
+            continue
+        try:
+            control.click(timeout=5000)
+            page.wait_for_timeout(700)
+            reset_job_search_scroll(page)
+            return True
+        except Exception:
+            continue
+
+    # Last fallback: aria-label/title can describe an icon-only arrow.
+    locators = [
+        page.locator(
+            "button[aria-label*='next' i], a[aria-label*='next' i], "
+            "[role='button'][aria-label*='next' i], "
+            "button[title*='next' i], a[title*='next' i]"
+        )
+    ]
+    for locator in locators:
+        control = _visible_first(locator)
+        if control is None:
+            continue
+        try:
+            control.click(timeout=5000)
+            page.wait_for_timeout(700)
+            reset_job_search_scroll(page)
+            return True
+        except Exception:
+            continue
+
+    return False
+
+
 def normalise_location_terms(raw: str) -> list[str]:
     """Return comma-separated location alternatives in normalized form."""
     result = []
