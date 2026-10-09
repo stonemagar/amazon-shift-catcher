@@ -330,19 +330,6 @@ def focus_accept_offer_button(page: Page) -> bool:
     return True
 
 
-def click_accept_offer_button(page: Page) -> bool:
-    """Click the visible 'Accept offer' button exactly once."""
-    button = find_accept_offer_button(page)
-    if button is None:
-        return False
-
-    try:
-        button.click(timeout=5000)
-        return True
-    except Exception:
-        return False
-
-
 def click_select_this_job(
     page: Page,
     timeout_seconds: float = 8.0,
