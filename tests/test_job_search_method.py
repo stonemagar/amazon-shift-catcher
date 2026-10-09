@@ -7,6 +7,7 @@ from amazon_shift_catcher.job_search_browser import (
     card_requires_detail_location_check,
     detect_application_stage,
     extract_card_location,
+    extract_reported_job_count,
     normalise_location_terms,
     text_matches_location,
 )
@@ -20,6 +21,11 @@ from amazon_shift_catcher.location_storage import load_locations, save_unique_lo
 
 
 class JobSearchMethodTests(unittest.TestCase):
+    def test_reported_job_count_is_parsed(self):
+        self.assertEqual(extract_reported_job_count("20 jobs found"), 20)
+        self.assertEqual(extract_reported_job_count("1 job found"), 1)
+        self.assertIsNone(extract_reported_job_count("Jobs available"))
+
     def test_location_terms_are_trimmed_and_deduplicated(self):
         self.assertEqual(
             normalise_location_terms(" Wembley, DA1, wembley , Croydon "),
