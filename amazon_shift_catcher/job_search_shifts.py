@@ -19,6 +19,7 @@ FIELD_LABELS = (
 )
 START_DATE_RE = re.compile(r"^\s*Start\s*Date\b", re.I)
 SELECT_THIS_JOB_RE = re.compile(r"^\s*Select\s+this\s+job\s*$", re.I)
+ACCEPT_OFFER_RE = re.compile(r"^\s*Accept\s+offer\s*$", re.I)
 
 
 @dataclass
@@ -288,6 +289,44 @@ def find_select_this_job_button(page: Page):
             has_text=SELECT_THIS_JOB_RE
         )
     )
+
+
+def find_accept_offer_button(page: Page):
+    """Return the visible 'Accept offer' control without clicking it."""
+    button = _visible_first(
+        page.get_by_role("button", name=ACCEPT_OFFER_RE)
+    )
+    if button is not None:
+        return button
+
+    return _visible_first(
+        page.locator("button, [role='button'], a").filter(
+            has_text=ACCEPT_OFFER_RE
+        )
+    )
+
+
+def click_select_this_job(
+    page: Page,
+    timeout_seconds: float = 8.0,
+) -> bool:
+    """Click 'Select this job' exactly once and stop before 'Accept offer'."""
+    button = find_select_this_job_button(page)
+    if button is None:
+        return False
+
+    try:
+        button.click(timeout=5000)
+    except Exception:
+        return False
+
+    deadline = time.monotonic() + max(1.0, timeout_seconds)
+    while time.monotonic() < deadline:
+        if find_accept_offer_button(page) is not None:
+            return True
+        time.sleep(0.15)
+
+    return False
 
 
 def open_shift_opportunity(
