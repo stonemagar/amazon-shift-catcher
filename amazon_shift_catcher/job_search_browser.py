@@ -222,6 +222,22 @@ def text_matches_location(text: str, desired_locations: list[str]) -> bool:
     return any(term.casefold() in haystack for term in desired_locations)
 
 
+def location_match_rank(text: str, desired_locations: list[str]) -> int | None:
+    """Return the matching location's priority index, or None when unmatched.
+
+    The order entered by the user defines priority: index 0 is highest priority.
+    With no configured locations, every location has rank 0.
+    """
+    if not desired_locations:
+        return 0
+
+    haystack = " ".join(text.split()).casefold()
+    for index, term in enumerate(desired_locations):
+        if term.casefold() in haystack:
+            return index
+    return None
+
+
 def card_requires_detail_location_check(text: str) -> bool:
     """Only ambiguous multi-location cards need opening to discover their site."""
     compact = " ".join(text.split())
