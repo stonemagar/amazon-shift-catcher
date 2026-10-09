@@ -966,6 +966,119 @@ def read_job_detail_location(page: Page) -> str | None:
     return extract_job_detail_location(raw_text)
 
 
+def read_job_detail_locations(
+    page: Page,
+    desired_locations: list[str] | None = None,
+    timeout_seconds: float = 6.0,
+) -> list[str]:
+    """Wait for and collect likely locations from a job-details page.
+
+    Amazon job details can render asynchronously and can place the location in
+    different DOM structures. This polls the page, checks the full body text,
+    and also inspects location/address-labelled elements.
+    """
+    desired_locations = desired_locations or []
+    deadline = time.monotonic() + max(1.0, timeout_seconds)
+    found = []
+    seen = set()
+
+    def add(value: str | None) -> None:
+        if not value:
+            return
+        compact = " ".join(value.split()).strip(" ,|-")
+        if not compact or len(compact) > 240:
+            return
+        key = compact.casefold()
+        if key in {
+            "location",
+            "work address",
+            "work location",
+            "job location",
+            "multiple on site locations available",
+            "united kingdom",
+        }:
+            return
+        if key not in seen:
+            seen.add(key)
+            found.append(compact)
+
+    while time.monotonic() < deadline:
+        try:
+            raw_text = page.locator("body").inner_text(timeout=1200)
+        except Exception:
+            raw_text = ""
+
+        add(extract_job_detail_location(raw_text))
+
+        # If one of the user's requested locations is visibly present anywhere
+        # in the detail text, preserve that city/area even when Amazon provides
+        # no stable address label.
+        folded = " ".join(raw_text.split()).casefold()
+        for desired in desired_locations:
+            if desired.casefold() in folded:
+                add(desired)
+
+        # Amazon sometimes renders location text in dedicated elements rather
+        # than next to a visible "Location" label.
+        selectors = (
+            "[data-testid*='location' i], "
+            "[data-testid*='address' i], "
+            "[aria-label*='location' i], "
+            "[aria-label*='address' i], "
+            "[class*='location' i], "
+            "[class*='address' i], "
+            "[id*='location' i], "
+            "[id*='address' i]"
+        )
+        try:
+            locator = page.locator(selectors)
+            count = min(locator.count(), 40)
+            for index in range(count):
+                item = locator.nth(index)
+                try:
+                    if not item.is_visible():
+                        continue
+                    text_value = item.inner_text(timeout=500)
+                except Exception:
+                    continue
+
+                # Prefer a clean extract, but keep short location-like text from
+                # dedicated location/address elements as a fallback.
+                extracted = extract_job_detail_location(text_value)
+                if extracted:
+                    add(extracted)
+                else:
+                    compact = " ".join(text_value.split()).strip()
+                    if (
+                        compact
+                        and len(compact) <= 180
+                        and (
+                            "," in compact
+                            or re.search(
+                                r"\b(?:England|Scotland|Wales|Northern Ireland)\b",
+                                compact,
+                                re.I,
+                            )
+                            or re.search(
+                                r"\b[A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2}\b",
+                                compact,
+                                re.I,
+                            )
+                        )
+                    ):
+                        add(compact)
+        except Exception:
+            pass
+
+        if found:
+            return found
+
+        # Wait for the SPA to finish populating the job details before giving up.
+        time.sleep(0.2)
+
+    return found
+
+
 def return_to_job_search(page: Page) -> None:
     """Return reliably to the documented Warehouse Associate result page."""
     open_job_search(page)
