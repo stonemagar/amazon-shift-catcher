@@ -843,7 +843,12 @@ def open_job_candidate(page: Page, candidate: JobCandidate) -> None:
 
 
 def extract_job_detail_location(raw_text: str) -> str | None:
-    """Extract a location/address shown on an opened Amazon job-details page."""
+    """Extract a location/address shown on an opened Amazon job-details page.
+
+    Amazon's job-detail layouts are not consistent. Prefer explicit location
+    labels, then fall back to UK-postcode/address-looking lines and finally to
+    concise city/region lines such as "Dartford, England".
+    """
     lines = [" ".join(line.split()).strip() for line in raw_text.splitlines()]
     lines = [line for line in lines if line]
 
@@ -853,6 +858,32 @@ def extract_job_detail_location(raw_text: str) -> str | None:
         "Job location",
         "Location",
     )
+
+    ignored_exact = {
+        "apply",
+        "share",
+        "united kingdom",
+        "amazon jobs",
+        "amazonjobs",
+    }
+    ignored_prefixes = (
+        "type:",
+        "duration:",
+        "pay rate:",
+        "hours:",
+        "job id:",
+        "start date:",
+        "end date:",
+        "schedule:",
+    )
+
+    def usable(value: str) -> bool:
+        lower = value.casefold()
+        return (
+            2 <= len(value) <= 220
+            and lower not in ignored_exact
+            and not any(lower.startswith(prefix) for prefix in ignored_prefixes)
+        )
 
     for index, line in enumerate(lines):
         for label in labels:
@@ -865,28 +896,56 @@ def extract_job_detail_location(raw_text: str) -> str | None:
                 continue
 
             value = " ".join(match.group(1).split()).strip()
-            if value and len(value) <= 220:
+            if value and usable(value):
                 return value
 
-            # Some layouts put the label and value on separate lines.
-            if index + 1 < len(lines):
-                next_line = lines[index + 1]
-                lower = next_line.casefold()
-                if (
-                    len(next_line) <= 220
-                    and lower not in {"apply", "share"}
-                    and not any(
-                        lower.startswith(prefix)
-                        for prefix in (
-                            "type:",
-                            "duration:",
-                            "pay rate:",
-                            "hours:",
-                            "job id:",
-                        )
+            # Some layouts put the label and address on following lines.
+            following = []
+            for next_line in lines[index + 1:index + 4]:
+                if not usable(next_line):
+                    break
+                if any(
+                    re.match(
+                        rf"^\s*{re.escape(other)}\s*:?",
+                        next_line,
+                        re.I,
                     )
+                    for other in labels
                 ):
-                    return next_line
+                    break
+                following.append(next_line)
+                if re.search(
+                    r"\b[A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2}\b",
+                    next_line,
+                    re.I,
+                ):
+                    break
+
+            if following:
+                return ", ".join(following)
+
+    # Fallback 1: a line containing a UK postcode is very likely the address.
+    postcode_re = re.compile(
+        r"\b(?:GIR\s*0AA|[A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2})\b",
+        re.I,
+    )
+    for line in lines:
+        if usable(line) and postcode_re.search(line):
+            return line
+
+    # Fallback 2: concise city/region lines used by Amazon job cards/details.
+    region_re = re.compile(
+        r"\b(?:England|Scotland|Wales|Northern Ireland)\b\s*$",
+        re.I,
+    )
+    for line in lines:
+        if (
+            usable(line)
+            and region_re.search(line)
+            and "," in line
+            and "warehouse associate" not in line.casefold()
+        ):
+            return line
 
     return None
 
