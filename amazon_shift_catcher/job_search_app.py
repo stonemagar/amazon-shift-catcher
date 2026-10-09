@@ -35,8 +35,10 @@ from .job_search_shifts import (
     apply_hours_preference,
     apply_time_preference,
     evaluate_shift_opportunity,
+    find_select_this_job_button,
     normalise_user_days,
     normalise_user_time,
+    open_shift_opportunity,
     read_shift_opportunities,
 )
 from .location_storage import save_unique_locations
@@ -57,6 +59,7 @@ class JobSearchState(str, Enum):
     APPLICATION_GUIDE = "APPLICATION_GUIDE"
     SHIFT_SELECTION = "SHIFT_SELECTION"
     SHIFT_REVIEW = "SHIFT_REVIEW"
+    SHIFT_DETAILS = "SHIFT_DETAILS"
     SECURITY_CHECK = "SECURITY_CHECK"
     BLOCKED = "BLOCKED"
     ERROR = "ERROR"
@@ -715,7 +718,7 @@ def review_shift_opportunities(
             f"#{best.index + 1} | "
             f"{best.shift or '?'} | {best.hours or '?'} | {best.location or '?'}"
         )
-        print("No shift has been selected automatically.")
+        print("Best match is ready to open.")
     else:
         print("\nNo visible shift currently matches all configured rules.")
 
@@ -847,21 +850,67 @@ def run() -> None:
                         _save_screenshot(page, "job-search-shift-selection", log)
 
                         state = JobSearchState.SHIFT_REVIEW
-                        review_shift_opportunities(
+                        evaluated = review_shift_opportunities(
                             page,
                             runtime_rules,
                             desired_locations,
                             log,
                         )
 
-                        _notify(
-                            "Amazon shift-selection page reached and visible shift cards "
-                            "were reviewed against your configured rules. "
-                            "No shift was selected automatically.",
-                            title="AMAZON SHIFT REVIEW COMPLETE",
-                            priority=5,
-                        )
-                        stop_reason = "shift review complete"
+                        matching = [item for item in evaluated if item[1]]
+                        matching.sort(key=lambda item: item[3], reverse=True)
+
+                        if matching:
+                            best = matching[0][0]
+                            log.warning(
+                                "Opening best matching shift card #%s. "
+                                "No offer/acceptance button will be clicked.",
+                                best.index + 1,
+                            )
+
+                            opened = open_shift_opportunity(page, best)
+                            if not opened:
+                                raise RuntimeError(
+                                    "Best matching shift was found, but its card "
+                                    "did not open the 'Select this job' page."
+                                )
+
+                            state = JobSearchState.SHIFT_DETAILS
+                            _save_screenshot(
+                                page,
+                                "job-search-best-shift",
+                                log,
+                            )
+
+                            if find_select_this_job_button(page) is None:
+                                raise RuntimeError(
+                                    "Best shift page opened, but the "
+                                    "'Select this job' button was not found."
+                                )
+
+                            print(
+                                "\nBEST MATCHING SHIFT OPENED. "
+                                "The program has stopped before 'Select this job'."
+                            )
+                            _notify(
+                                "Best matching Amazon shift has been opened. "
+                                "The program stopped before clicking 'Select this job'.",
+                                title="AMAZON BEST SHIFT READY",
+                                priority=5,
+                            )
+                            stop_reason = (
+                                "best matching shift opened; "
+                                "Select this job awaiting user"
+                            )
+                        else:
+                            _notify(
+                                "Amazon shift-selection page reached and visible "
+                                "shift cards were reviewed. No shift currently "
+                                "matches all selected filters.",
+                                title="AMAZON SHIFT REVIEW COMPLETE",
+                                priority=5,
+                            )
+                            stop_reason = "shift review complete; no matching shift"
                     else:
                         stop_reason = "application flow stopped"
                     break
