@@ -615,30 +615,36 @@ def read_visible_shift_cards(page: Page) -> list[dict]:
     return cards
 
 
+def highlight_shift_card(page: Page, element, marker: str = "best-match") -> bool:
+    """Highlight one existing Amazon shift card without moving/reordering the DOM."""
+    if element is None:
+        return False
+
+    try:
+        element.evaluate(
+            """(el, marker) => {
+                el.setAttribute('data-shift-catcher-highlight', marker);
+                el.style.outline = '4px solid #00a8e1';
+                el.style.outlineOffset = '3px';
+                el.scrollIntoView({behavior: 'instant', block: 'center', inline: 'nearest'});
+            }""",
+            marker,
+        )
+        page.wait_for_timeout(100)
+        return True
+    except Exception as exc:
+        log.warning("Could not visually highlight shift card: %s", exc)
+        return False
+
+
 def highlight_priority_shift_card(page: Page, cards: list[dict], priority_hours: float):
-    """Highlight and scroll to the first exact-priority card without reordering DOM."""
+    """Backward-compatible exact-hours highlighter used by older Method 1 code."""
     exact = [card for card in cards if card.get("hours") == priority_hours]
     if not exact:
         return None
 
     chosen = exact[0]
-    element = chosen.get("element")
-    if element is None:
-        return chosen
-
-    try:
-        element.evaluate(
-            """el => {
-                el.setAttribute('data-shift-catcher-priority', 'true');
-                el.style.outline = '4px solid #00a8e1';
-                el.style.outlineOffset = '3px';
-                el.scrollIntoView({behavior: 'instant', block: 'center', inline: 'nearest'});
-            }"""
-        )
-        page.wait_for_timeout(100)
-    except Exception as exc:
-        log.warning("Could not visually highlight priority shift card: %s", exc)
-
+    highlight_shift_card(page, chosen.get("element"), marker="priority-hours")
     return chosen
 
 
