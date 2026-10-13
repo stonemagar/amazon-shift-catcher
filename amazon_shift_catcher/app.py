@@ -11,7 +11,6 @@ from playwright.sync_api import sync_playwright
 
 from .alarm import start_alarm, stop_alarm
 from .browser import (
-    highlight_priority_shift_card,
     highlight_shift_card,
     page_has_security_challenge,
     reach_shift_page,
@@ -30,7 +29,7 @@ from .job_search_shifts import (
     parse_shift_opportunity,
     read_shift_opportunities,
 )
-from .monitoring import MonitorState, SessionMetrics, rank_hours
+from .monitoring import MonitorState, SessionMetrics
 from .notifier import send_notification
 
 
@@ -79,43 +78,6 @@ def load_config():
             "config.json not found. Copy config.example.json to config.json first."
         )
     return json.loads(config_path.read_text(encoding="utf-8"))
-
-
-def choose_priority_hours(default_hours: float) -> float:
-    options = {"1": 10.0, "2": 20.0, "3": 30.0, "4": 40.0}
-    direct_values = {10.0, 20.0, 30.0, 40.0}
-
-    print("\n" + "=" * 58)
-    print("AMAZON SHIFT CATCHER - PRIORITY HOURS")
-    print("Choose the weekly hours that should get HIGHEST PRIORITY:")
-    print("  1. 10 hours")
-    print("  2. 20 hours")
-    print("  3. 30 hours")
-    print("  4. 40 hours")
-    print(f"Press Enter to keep config default as priority: {default_hours:g} hours")
-    print("=" * 58)
-
-    while True:
-        choice = input("Select 1-4 (or type 10/20/30/40): ").strip()
-        if choice == "":
-            selected = float(default_hours)
-            break
-        if choice in options:
-            selected = options[choice]
-            break
-        try:
-            typed = float(choice)
-        except ValueError:
-            typed = -1
-        if typed in direct_values:
-            selected = typed
-            break
-        print("Invalid choice. Please select 1, 2, 3, 4, or type 10/20/30/40.")
-
-    print(f"\nPriority selected: {selected:g} hours/week")
-    print("Amazon hours filter: OFF - monitor all shifts Amazon shows")
-    print("Starting monitor...\n")
-    return selected
 
 
 def _read_positive_hours(prompt: str) -> float:
