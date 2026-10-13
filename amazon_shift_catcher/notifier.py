@@ -10,6 +10,7 @@ log = logging.getLogger(__name__)
 # errors and recovery failures are still sent normally.
 _ROUTINE_TITLES = {
     "amazon monitor started - priority mode",
+    "amazon monitor started - method 1 v2",
     "amazon 403 - recovery mode",
     "amazon 403 cleared",
     "amazon monitor shutdown",
