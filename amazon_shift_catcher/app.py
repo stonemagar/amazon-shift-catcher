@@ -12,12 +12,23 @@ from playwright.sync_api import sync_playwright
 from .alarm import start_alarm, stop_alarm
 from .browser import (
     highlight_priority_shift_card,
+    highlight_shift_card,
     page_has_security_challenge,
     reach_shift_page,
     read_visible_shift_cards,
     reset_amazon_filters_for_all_shifts,
     save_screenshot,
     wait_for_schedule_settled,
+)
+from .job_search_shifts import (
+    apply_days_preference,
+    apply_hours_preference,
+    apply_time_preference,
+    evaluate_shift_opportunity,
+    normalise_user_days,
+    normalise_user_time,
+    parse_shift_opportunity,
+    read_shift_opportunities,
 )
 from .monitoring import MonitorState, SessionMetrics, rank_hours
 from .notifier import send_notification
@@ -105,6 +116,159 @@ def choose_priority_hours(default_hours: float) -> float:
     print("Amazon hours filter: OFF - monitor all shifts Amazon shows")
     print("Starting monitor...\n")
     return selected
+
+
+def _read_positive_hours(prompt: str) -> float:
+    while True:
+        raw = input(prompt).strip()
+        try:
+            value = float(raw)
+        except ValueError:
+            value = 0
+        if value > 0:
+            return value
+        print("Please enter a positive number of hours.")
+
+
+def choose_method1_runtime_rules(base_rules: dict) -> dict:
+    """Build Method 1 v2 runtime rules using Method 2's filtering engine."""
+    rules = dict(base_rules or {})
+
+    print("\n" + "=" * 64)
+    print("METHOD 1 V2 - WEEKLY HOURS")
+    print("1 = Any hours")
+    print("2 = Exact hours")
+    print("3 = Maximum hours")
+    print("4 = Preferred hours + maximum")
+    print("=" * 64)
+    while True:
+        choice = input("Select hours preference [1-4]: ").strip()
+        if choice == "1":
+            rules = apply_hours_preference(rules, "any")
+            break
+        if choice == "2":
+            exact = _read_positive_hours("Exact weekly hours: ")
+            rules = apply_hours_preference(rules, "exact", exact_hours=exact)
+            break
+        if choice == "3":
+            maximum = _read_positive_hours("Maximum weekly hours: ")
+            rules = apply_hours_preference(rules, "max", max_hours=maximum)
+            break
+        if choice == "4":
+            preferred = _read_positive_hours("Preferred weekly hours: ")
+            maximum = _read_positive_hours("Maximum weekly hours: ")
+            if preferred > maximum:
+                print("Preferred hours cannot exceed maximum hours.")
+                continue
+            rules = apply_hours_preference(
+                rules,
+                "preferred_max",
+                preferred_hours=preferred,
+                max_hours=maximum,
+            )
+            break
+        print("Please enter 1, 2, 3, or 4.")
+
+    print("\n" + "=" * 64)
+    print("METHOD 1 V2 - DAYS")
+    print("1 = Any days")
+    print("2 = Choose allowed days")
+    print("3 = Choose blocked days")
+    print("=" * 64)
+    while True:
+        choice = input("Select day preference [1-3]: ").strip()
+        if choice == "1":
+            rules = apply_days_preference(rules, "any")
+            break
+        if choice in {"2", "3"}:
+            raw = input("Enter days, e.g. Wed, Thu, Fri, Sat, Sun: ").strip()
+            days, invalid = normalise_user_days(raw)
+            if invalid:
+                print("Invalid day(s): " + ", ".join(invalid))
+                continue
+            if not days:
+                print("Please enter at least one day.")
+                continue
+            mode = "allowed" if choice == "2" else "blocked"
+            rules = apply_days_preference(rules, mode, days)
+            break
+        print("Please enter 1, 2, or 3.")
+
+    print("\n" + "=" * 64)
+    print("METHOD 1 V2 - SHIFT TIME")
+    print("1 = Any time")
+    print("2 = Day shift   (starts 06:00-17:59 and does not cross midnight)")
+    print("3 = Night shift (starts 18:00-05:59 or crosses midnight)")
+    print("4 = Specific time window")
+    print("=" * 64)
+    while True:
+        choice = input("Select time preference [1-4]: ").strip()
+        if choice == "1":
+            rules = apply_time_preference(rules, "any")
+            break
+        if choice == "2":
+            rules = apply_time_preference(rules, "day")
+            break
+        if choice == "3":
+            rules = apply_time_preference(rules, "night")
+            break
+        if choice == "4":
+            earliest = normalise_user_time(
+                input("Earliest start time (HH:MM): ").strip()
+            )
+            latest = normalise_user_time(
+                input("Latest end time (HH:MM): ").strip()
+            )
+            if not earliest or not latest:
+                print("Invalid time. Example: 09:00, 13:30, 9 AM, 10:30 PM.")
+                continue
+            rules = apply_time_preference(
+                rules,
+                "window",
+                earliest_start=earliest,
+                latest_end=latest,
+            )
+            break
+        print("Please enter 1, 2, 3, or 4.")
+
+    return rules
+
+
+def method1_filter_summary(rules: dict) -> str:
+    hours = rules.get("hours_preference", {"mode": "any"})
+    days = rules.get("days_preference", {"mode": "any"})
+    time_pref = rules.get("time_preference", {"mode": "any"})
+
+    parts = []
+    mode = hours.get("mode", "any")
+    if mode == "exact":
+        parts.append(f"hours=EXACT {hours['exact_hours']:g}h")
+    elif mode == "max":
+        parts.append(f"hours=MAX {hours['max_hours']:g}h")
+    elif mode == "preferred_max":
+        parts.append(
+            f"hours=PREFER {hours['preferred_hours']:g}h / MAX {hours['max_hours']:g}h"
+        )
+    else:
+        parts.append("hours=ANY")
+
+    day_mode = days.get("mode", "any")
+    if day_mode == "allowed":
+        parts.append("allowed_days=" + ",".join(days.get("days", [])))
+    elif day_mode == "blocked":
+        parts.append("blocked_days=" + ",".join(days.get("days", [])))
+    else:
+        parts.append("days=ANY")
+
+    time_mode = time_pref.get("mode", "any")
+    if time_mode == "window":
+        parts.append(
+            f"time={time_pref.get('earliest_start')}-{time_pref.get('latest_end')}"
+        )
+    else:
+        parts.append(f"time={time_mode.upper()}")
+
+    return " | ".join(parts)
 
 
 def timestamp_name(prefix: str) -> Path:
