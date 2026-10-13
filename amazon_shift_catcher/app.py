@@ -685,68 +685,131 @@ def capture_shift_page_every_second(page, log, metrics: SessionMetrics) -> None:
     log.info("Live shift screenshot recorder saved %s screenshot(s).", count)
 
 
+def _format_opportunity(opportunity) -> str:
+    parts = [
+        f"Hours={opportunity.hours_per_week:g}h"
+        if opportunity.hours_per_week is not None
+        else "Hours=?",
+        "Days=" + (",".join(opportunity.days) if opportunity.days else "?"),
+        f"Time={opportunity.start_time or '?'}-{opportunity.end_time or '?'}",
+    ]
+    if opportunity.start_date:
+        parts.append(f"Start={opportunity.start_date}")
+    if opportunity.location:
+        parts.append(f"Location={opportunity.location}")
+    return " | ".join(parts)
+
+
 def handle_available_shifts(
     page,
     log,
-    priority_hours: float,
+    rules: dict,
     metrics: SessionMetrics,
 ) -> bool:
-    """Detect all visible shifts, rank locally, highlight priority, and freeze page."""
-    cards = read_visible_shift_cards(page)
-    visible_hours = [card["hours"] for card in cards]
+    """Evaluate every visible shift and stop only when a verified match exists."""
+    opportunities = read_shift_opportunities(page)
 
-    if not visible_hours:
+    # Method 1's older card reader is retained as a fallback because Amazon has
+    # used more than one shift-card layout. Feed its text through the same
+    # Method 2 parser/evaluator so the filtering rules remain identical.
+    if not opportunities:
+        fallback_cards = read_visible_shift_cards(page)
+        opportunities = [
+            parse_shift_opportunity(
+                card.get("text", ""),
+                index=index,
+                card=card.get("element"),
+            )
+            for index, card in enumerate(fallback_cards)
+        ]
+
+    if not opportunities:
         visible_hours = find_all_available_shift_hours(page)
-    if not visible_hours:
+        if visible_hours:
+            log.warning(
+                "Amazon shows shift hours (%s), but Method 1 v2 could not parse "
+                "complete shift cards yet. Monitoring will continue rather than "
+                "accepting an unverified shift.",
+                ", ".join(f"{value:g}h" for value in visible_hours),
+            )
         return False
 
-    ranked_hours = rank_hours(visible_hours, priority_hours)
-    exact_count = sum(1 for value in visible_hours if value == priority_hours)
-    metrics.record_shift_batch(len(visible_hours), exact_count)
+    matches = []
+    review_lines = []
+
+    for opportunity in opportunities:
+        is_match, reasons, score = evaluate_shift_opportunity(
+            opportunity,
+            rules,
+            desired_locations=[],
+        )
+        status = "MATCH" if is_match else "NO MATCH"
+        review_lines.append(
+            f"#{opportunity.index + 1} {status} | "
+            f"{_format_opportunity(opportunity)}"
+        )
+        if reasons:
+            review_lines.append("  Reasons: " + "; ".join(reasons))
+        if is_match:
+            matches.append((score, opportunity.index, opportunity))
+
+    metrics.record_shift_batch(len(opportunities), len(matches))
+
+    log.info(
+        "METHOD 1 V2 SHIFT REVIEW\n%s",
+        "\n".join(review_lines),
+    )
+
+    if not matches:
+        log.info(
+            "%s visible shift(s) found, but none match the current "
+            "hours/day/time preferences. Monitoring will continue.",
+            len(opportunities),
+        )
+        return False
+
+    # Higher Method 2 score is better. Preserve Amazon's original card order
+    # when scores tie.
+    matches.sort(key=lambda item: (-item[0], item[1]))
+    best_score, _best_index, best = matches[0]
+
     metrics.transition(
         MonitorState.SHIFT_FOUND,
         log,
-        f"{len(visible_hours)} visible shift(s); {exact_count} exact-priority",
+        f"{len(matches)} matching shift(s) from {len(opportunities)} visible; "
+        f"best score={best_score}",
     )
 
     log.warning(
-        "AVAILABLE SHIFT(S) DETECTED. Visible hours=%s | Local priority order=%s | "
-        "Preferred=%sh. Amazon card order is NOT changed.",
-        ", ".join(f"{h:g}h" for h in visible_hours),
-        " -> ".join(f"{h:g}h" for h in ranked_hours),
-        f"{priority_hours:g}",
+        "BEST MATCH FOUND | %s | Matching shifts=%s/%s. "
+        "Refreshing is stopping and Amazon's card order is unchanged.",
+        _format_opportunity(best),
+        len(matches),
+        len(opportunities),
     )
 
-    if cards:
-        highlighted = highlight_priority_shift_card(page, cards, priority_hours)
-        if highlighted is None:
-            try:
-                cards[0]["element"].scroll_into_view_if_needed(timeout=1500)
-            except Exception:
-                pass
+    if best.card is not None:
+        highlight_shift_card(page, best.card, marker="method1-v2-best-match")
 
     tracked_screenshot(page, timestamp_name("shift-freeze"), metrics)
     start_alarm()
 
-    if exact_count:
-        message = (
-            f"Amazon shift(s) available.\n"
-            f"PRIORITY: {priority_hours:g} hours/week found ({exact_count}).\n"
-            f"All visible hours: {', '.join(f'{h:g}h' for h in visible_hours)}\n\n"
-            "Refreshing has STOPPED. The first exact-priority card was highlighted and scrolled into view when identifiable. "
-            "Amazon's card order was not changed, so you can click the original card normally."
-        )
-        title = "AMAZON PRIORITY SHIFT FOUND"
-    else:
-        message = (
-            f"Amazon shift(s) available, but no exact {priority_hours:g}h shift was visible.\n"
-            f"Other visible hours: {', '.join(f'{h:g}h' for h in visible_hours)}\n\n"
-            "Refreshing has STOPPED so you can choose one manually. Amazon's original cards were not rearranged."
-        )
-        title = "AMAZON SHIFT FOUND - OTHER HOURS"
+    message = (
+        "Amazon matching shift found.\n"
+        f"Best match: {_format_opportunity(best)}\n"
+        f"Matching shifts: {len(matches)} of {len(opportunities)} visible.\n\n"
+        "Refreshing has STOPPED. The best matching card was highlighted and "
+        "scrolled into view when identifiable. Amazon's original card order "
+        "was not changed."
+    )
+    tracked_notification(
+        metrics,
+        message,
+        title="AMAZON MATCHING SHIFT FOUND",
+        priority=5,
+    )
 
-    tracked_notification(metrics, message, title=title, priority=5)
-    log.warning("Refreshing stopped so the live Amazon cards remain clickable.")
+    log.warning("Refreshing stopped so the live Amazon shift remains clickable.")
     capture_shift_page_every_second(page, log, metrics)
     return True
 
@@ -754,8 +817,8 @@ def handle_available_shifts(
 def run():
     load_dotenv(ROOT / ".env")
     config = load_config()
-    configured_default = float(config.get("rules", {}).get("max_hours_per_week", 20))
-    selected_priority_hours = choose_priority_hours(configured_default)
+    runtime_rules = choose_method1_runtime_rules(config.get("rules", {}))
+    filter_summary = method1_filter_summary(runtime_rules)
 
     setup_logging()
     log = logging.getLogger("shift-catcher")
@@ -773,10 +836,10 @@ def run():
         "403 passive recovery watcher=%.0fs DOM check; no automatic reload is added by the watcher.",
         PASSIVE_RECOVERY_POLL_SECONDS,
     )
-    log.info("Priority weekly hours=%s", selected_priority_hours)
+    log.info("Method 1 v2 filters: %s", filter_summary)
     log.info(
-        "Priority mode: no desired-hours filter is imposed by the catcher. "
-        "All shifts Amazon shows are monitored; exact priority hours are highlighted locally."
+        "Method 1 v2 uses Method 2's hours/day/time evaluation locally. "
+        "Amazon's own hours filter remains off so all visible shifts can be reviewed."
     )
     log.info("Connecting to existing Brave session at %s", cdp_url)
 
@@ -808,7 +871,7 @@ def run():
                     return
 
             metrics.mark_check()
-            if handle_available_shifts(page, log, selected_priority_hours, metrics):
+            if handle_available_shifts(page, log, runtime_rules, metrics):
                 stop_reason = "shift found"
                 return
 
@@ -823,14 +886,14 @@ def run():
 
             tracked_notification(
                 metrics,
-                "Amazon Shift Catcher connected to your existing Brave session.\n"
-                f"Priority hours: {selected_priority_hours:g} hours/week\n"
+                "Amazon Shift Catcher Method 1 v2 connected to your existing Brave session.\n"
+                f"Filters: {filter_summary}\n"
                 "Amazon desired-hours filter: not used by the catcher\n"
-                "All visible Amazon shifts will be detected.\n"
+                "All visible shifts will be parsed, filtered and ranked locally.\n"
                 f"Monitoring interval: {interval} seconds.\n"
                 f"403 automatic recovery test: every {BLOCKED_RETRY_SECONDS} seconds while blocked.\n"
                 "Manual refresh during 403 recovery is detected automatically.",
-                title="Amazon monitor started - priority mode",
+                title="Amazon monitor started - Method 1 v2",
                 priority=3,
             )
 
@@ -868,7 +931,7 @@ def run():
                     stop_reason = "security check"
                     break
 
-                if handle_available_shifts(page, log, selected_priority_hours, metrics):
+                if handle_available_shifts(page, log, runtime_rules, metrics):
                     stop_reason = "shift found"
                     break
 
