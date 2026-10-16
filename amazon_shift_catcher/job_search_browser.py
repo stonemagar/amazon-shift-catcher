@@ -10,17 +10,25 @@ from .browser import page_has_security_challenge
 
 log = logging.getLogger(__name__)
 
+JOB_SEARCH_LOCATION = "London"
 JOB_SEARCH_URL = (
     "https://www.jobsatamazon.co.uk/app#/jobSearch?"
-    "query=Warehouse%20Associate&postal=&locale=en-GB"
+    "query=&postal=London&locale=en-GB"
 )
 
-# Amazon can prefix the role name, e.g. "Delivery Station Warehouse Associate".
-# Keep the match focused on role titles rather than requiring one exact wording.
-WAREHOUSE_TITLE_RE = re.compile(
-    r"^\s*(?:[A-Za-z][A-Za-z&/'-]*\s+){0,5}Warehouse Associate\s*$",
+# Method 2 deliberately leaves Amazon's "Search jobs" box empty and uses
+# London's location search instead. From those results, only these operations
+# roles are candidates for the application workflow.
+TARGET_ROLE_TITLE_RE = re.compile(
+    r"(?:Delivery\s+Station\s+Warehouse\s+Associate|"
+    r"Sortation\s+Center\s+Warehouse\s+Associate|"
+    r"Fulfil(?:l)?ment\s+Center\s+Warehouse\s+Associate|"
+    r"Warehouse\s+Operator)",
     re.I,
 )
+
+# Backward-compatible name retained for existing imports/tests.
+WAREHOUSE_TITLE_RE = TARGET_ROLE_TITLE_RE
 APPLY_RE = re.compile(r"^\s*Apply\s*$", re.I)
 NEXT_RE = re.compile(r"^\s*Next\s*$", re.I)
 START_APPLICATION_RE = re.compile(r"^\s*Start Application\s*$", re.I)
@@ -97,7 +105,10 @@ def reset_job_search_scroll(page: Page) -> None:
 
                     if (
                         node === document.scrollingElement ||
-                        (scrollable && text.includes('warehouse associate'))
+                        (scrollable && (
+                            text.includes('warehouse associate') ||
+                            text.includes('warehouse operator')
+                        ))
                     ) {
                         node.scrollTop = 0;
                     }
@@ -115,7 +126,7 @@ def scroll_job_search_results(page: Page) -> bool:
 
     Amazon can place the cards inside an inner scrollable container instead of
     the document scrollbar. Search every plausible scroll container, prioritize
-    one containing Warehouse Associate results, and move the first one that still
+    one containing a target warehouse-role result, and move the first one that still
     has content below it.
     """
     try:
@@ -149,7 +160,10 @@ def scroll_job_search_results(page: Page) -> bool:
                     const text = (node.innerText || '').toLowerCase();
                     let score = remaining;
 
-                    if (text.includes('warehouse associate')) {
+                    if (
+                        text.includes('warehouse associate') ||
+                        text.includes('warehouse operator')
+                    ) {
                         score += 1000000;
                     }
                     if (/\d+\s+jobs?\s+found/i.test(text)) {
@@ -390,7 +404,7 @@ def extract_card_location(raw_text: str) -> str | None:
     candidates = []
     for line in lines:
         lower = line.casefold()
-        if "warehouse associate" in lower:
+        if TARGET_ROLE_TITLE_RE.search(line):
             continue
         if lower.startswith(ignored_prefixes):
             continue
@@ -437,7 +451,7 @@ def _visible_first(locator):
 
 
 def _card_ancestor(title):
-    """Find a compact ancestor representing one Warehouse Associate result card."""
+    """Find a compact ancestor representing one target warehouse-role result card."""
     best = None
     best_text = ""
 
@@ -451,7 +465,7 @@ def _card_ancestor(title):
         if not text or len(text) > 2500:
             continue
 
-        if "warehouse associate" not in text.casefold():
+        if not TARGET_ROLE_TITLE_RE.search(text):
             continue
 
         # Prefer an ancestor that also contains job metadata or a location indicator.
@@ -481,8 +495,8 @@ def _card_ancestor(title):
 
 
 def read_warehouse_job_cards(page: Page) -> list[JobCandidate]:
-    """Read visible Warehouse Associate result cards without clicking Apply."""
-    titles = page.get_by_text(WAREHOUSE_TITLE_RE)
+    """Read visible target-role result cards without clicking Apply."""
+    titles = page.get_by_text(TARGET_ROLE_TITLE_RE)
     cards = []
     seen = set()
 
@@ -752,12 +766,19 @@ def detect_application_stage(page: Page) -> str:
     return "UNKNOWN"
 
 
-def _fill_warehouse_search_if_available(page: Page) -> None:
-    """Best-effort UI alignment with the documented search settings."""
+def _clear_job_search_if_available(page: Page) -> None:
+    """Keep Amazon's Search jobs/keyword box empty."""
     candidates = [
-        page.get_by_role("textbox", name=re.compile(r"(search|job)", re.I)),
+        page.get_by_role(
+            "textbox",
+            name=re.compile(r"(search\s*jobs?|job\s*(title|search)|keyword)", re.I),
+        ),
         page.locator(
-            'input[placeholder*="search" i], input[aria-label*="search" i]'
+            'input[placeholder*="search jobs" i], '
+            'input[placeholder*="job title" i], '
+            'input[placeholder*="keyword" i], '
+            'input[aria-label*="search jobs" i], '
+            'input[aria-label*="job title" i]'
         ),
     ]
 
@@ -766,17 +787,46 @@ def _fill_warehouse_search_if_available(page: Page) -> None:
         if field is None:
             continue
         try:
-            current = field.input_value(timeout=1200)
+            if field.input_value(timeout=1200):
+                field.fill("", timeout=2500)
+            return
+        except Exception:
+            continue
+
+
+def _fill_london_location_if_available(page: Page) -> None:
+    """Set Amazon's location/postcode search box to London."""
+    candidates = [
+        page.get_by_role(
+            "textbox",
+            name=re.compile(r"(location|postcode|postal|city)", re.I),
+        ),
+        page.locator(
+            'input[placeholder*="location" i], '
+            'input[placeholder*="postcode" i], '
+            'input[placeholder*="postal" i], '
+            'input[aria-label*="location" i], '
+            'input[aria-label*="postcode" i], '
+            'input[aria-label*="postal" i]'
+        ),
+    ]
+
+    for locator in candidates:
+        field = _visible_first(locator)
+        if field is None:
+            continue
+        try:
+            current = field.input_value(timeout=1200).strip()
         except Exception:
             current = ""
 
-        if "warehouse associate" in current.casefold():
+        if current.casefold() == JOB_SEARCH_LOCATION.casefold():
             return
 
         try:
-            field.fill("Warehouse Associate", timeout=2500)
+            field.fill(JOB_SEARCH_LOCATION, timeout=2500)
             page.keyboard.press("Enter")
-            page.wait_for_timeout(500)
+            page.wait_for_timeout(700)
             return
         except Exception:
             continue
@@ -802,7 +852,7 @@ def _select_all_jobs_if_available(page: Page) -> None:
 
 
 def open_job_search(page: Page) -> None:
-    """Open the Warehouse Associate search page and align visible search controls."""
+    """Open the London job search with an empty job-keyword field."""
     page.goto(JOB_SEARCH_URL, wait_until="domcontentloaded")
 
     if page_has_security_challenge(page):
@@ -812,7 +862,8 @@ def open_job_search(page: Page) -> None:
         raise RuntimeError("Amazon returned a 403 / request-blocked page.")
 
     _select_all_jobs_if_available(page)
-    _fill_warehouse_search_if_available(page)
+    _clear_job_search_if_available(page)
+    _fill_london_location_if_available(page)
     page.wait_for_timeout(700)
 
 
@@ -943,7 +994,7 @@ def extract_job_detail_location(raw_text: str) -> str | None:
             usable(line)
             and region_re.search(line)
             and "," in line
-            and "warehouse associate" not in line.casefold()
+            and not TARGET_ROLE_TITLE_RE.search(line)
         ):
             return line
 
@@ -1080,7 +1131,7 @@ def read_job_detail_locations(
 
 
 def return_to_job_search(page: Page) -> None:
-    """Return reliably to the documented Warehouse Associate result page."""
+    """Return reliably to the London target-role result page."""
     open_job_search(page)
 
 
@@ -1092,7 +1143,7 @@ def wait_for_manual_login(page: Page) -> None:
     print("AMAZON JOB SEARCH METHOD - MANUAL LOGIN")
     print("1. Use the Brave window to sign in to Amazon Jobs.")
     print("2. Complete any OTP, CAPTCHA, security or identity check manually.")
-    print("3. Return to the Warehouse Associate search page.")
+    print("3. Return to the London job-search results page.")
     print("4. Return to this terminal and press Enter.")
     print("=" * 72 + "\n")
 
