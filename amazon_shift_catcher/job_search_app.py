@@ -102,22 +102,18 @@ def load_config() -> dict:
 
 
 def choose_desired_locations() -> list[str]:
+    """Method 2 now uses London as the fixed Amazon location search."""
+    selected = ["London"]
     print("\n" + "=" * 64)
-    print("AMAZON JOB SEARCH METHOD - LOCATION")
-    print("Enter the location/postcode/warehouse area you want.")
-    print("You can enter alternatives separated by commas.")
-    print("Example: Wembley, Croydon, DA1")
-    print("Press Enter with no value to accept the first Warehouse Associate job.")
+    print("AMAZON JOB SEARCH METHOD - SEARCH SETTINGS")
+    print("Search jobs: EMPTY")
+    print("Location: London")
+    print("Target roles:")
+    print("  - Delivery Station Warehouse Associate")
+    print("  - Sortation Center Warehouse Associate")
+    print("  - Fulfilment Center Warehouse Associate")
+    print("  - Warehouse Operator")
     print("=" * 64)
-
-    raw = input("Desired location(s): ").strip()
-    selected = normalise_location_terms(raw)
-
-    if selected:
-        print("Monitoring location(s): " + ", ".join(selected))
-    else:
-        print("Monitoring location: ANY")
-
     return selected
 
 
@@ -497,7 +493,7 @@ def find_desired_job(
     log,
     location_strategy: str = "first",
 ):
-    """Scan Warehouse Associate cards and choose a matching location.
+    """Scan target warehouse-role cards and choose a matching location.
 
     'first' preserves the fastest behavior: the first matching card wins.
     'priority' scans the result set and prefers locations in the exact order
@@ -553,7 +549,7 @@ def find_desired_job(
                 )
 
             log.info(
-                "%s unchecked Warehouse Associate card(s) are visible; "
+                "%s unchecked target-role card(s) are visible; "
                 "%s card(s) have actually been checked so far.",
                 len(new_cards),
                 len(checked_keys),
@@ -577,7 +573,7 @@ def find_desired_job(
                     else "?"
                 )
                 log.info(
-                    "Checking Warehouse Associate card %s/%s on results page %s: %s",
+                    "Checking target-role card %s/%s on results page %s: %s",
                     card_number,
                     total_label,
                     current_page,
@@ -801,11 +797,10 @@ def find_desired_job(
 
     if reported_total is not None and len(checked_keys) < reported_total:
         log.warning(
-            "Amazon reports %s total job result(s), but %s Warehouse Associate "
-            "card(s) were discovered. The reported total can include other role "
-            "titles; if more Warehouse Associate cards are visibly present, send "
-            "the card titles or a screenshot so the title/card detector can be "
-            "adjusted.",
+            "Amazon reports %s total job result(s), but %s target warehouse-role "
+            "card(s) were discovered. Other role titles are intentionally ignored; "
+            "if more target-role cards are visibly present, send the card titles or "
+            "a screenshot so the title/card detector can be adjusted.",
             reported_total,
             len(checked_keys),
         )
@@ -1069,8 +1064,11 @@ def run() -> None:
 
             _notify(
                 "Amazon Job Search catcher is active.\n"
-                "Search: Warehouse Associate\n"
-                f"Location: {', '.join(desired_locations) if desired_locations else 'ANY'}\n"
+                "Search jobs: EMPTY\n"
+                "Location: London\n"
+                "Target roles: Delivery Station Warehouse Associate; "
+                "Sortation Center Warehouse Associate; "
+                "Fulfilment Center Warehouse Associate; Warehouse Operator\n"
                 f"Check interval: {interval} seconds.",
                 title="Amazon Job Search monitor started",
                 priority=3,
@@ -1118,12 +1116,12 @@ def run() -> None:
                     )
 
                     log.warning(
-                        "MATCHING WAREHOUSE ASSOCIATE JOB FOUND. URL=%s | %s",
+                        "MATCHING TARGET WAREHOUSE JOB FOUND. URL=%s | %s",
                         match["url"],
                         apply_status,
                     )
                     _notify(
-                        "Matching Warehouse Associate job found.\n"
+                        "Matching target warehouse job found.\n"
                         f"Location target: {location_label}\n"
                         f"{apply_status}\n\n"
                         "The catcher will now follow Apply -> Next -> Start Application "
@@ -1131,7 +1129,7 @@ def run() -> None:
                         title="AMAZON JOB FOUND",
                         priority=5,
                     )
-                    print("\nMATCHING WAREHOUSE ASSOCIATE JOB FOUND.")
+                    print("\nMATCHING TARGET WAREHOUSE JOB FOUND.")
                     state = JobSearchState.APPLICATION_GUIDE
 
                     application_page = advance_to_shift_selection(page, log)
@@ -1293,7 +1291,7 @@ def run() -> None:
 
                 state = JobSearchState.JOB_SEARCH
                 log.info(
-                    "No matching Warehouse Associate job found. Checking again in %s seconds.",
+                    "No matching target warehouse job found. Checking again in %s seconds.",
                     interval,
                 )
                 time.sleep(interval)
