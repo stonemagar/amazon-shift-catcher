@@ -30,6 +30,26 @@ from amazon_shift_catcher.job_search_app import _unchecked_job_candidates
 
 
 class JobSearchMethodTests(unittest.TestCase):
+    def test_target_warehouse_role_titles(self):
+        self.assertIsNotNone(
+            WAREHOUSE_TITLE_RE.search("Delivery Station Warehouse Associate")
+        )
+        self.assertIsNotNone(
+            WAREHOUSE_TITLE_RE.search("Sortation Center Warehouse Associate")
+        )
+        self.assertIsNotNone(
+            WAREHOUSE_TITLE_RE.search("Fulfilment Center Warehouse Associate")
+        )
+        self.assertIsNotNone(
+            WAREHOUSE_TITLE_RE.search("Fulfillment Center Warehouse Associate")
+        )
+        self.assertIsNotNone(
+            WAREHOUSE_TITLE_RE.search("Warehouse Operator")
+        )
+        self.assertIsNone(
+            WAREHOUSE_TITLE_RE.search("Customer Service Associate")
+        )
+
     def test_reported_job_count_is_parsed(self):
         self.assertEqual(extract_reported_job_count("20 jobs found"), 20)
         self.assertEqual(extract_reported_job_count("1 job found"), 1)
