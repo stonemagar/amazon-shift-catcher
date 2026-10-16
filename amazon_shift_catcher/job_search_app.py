@@ -98,19 +98,34 @@ def load_config() -> dict:
     return json.loads(config_path.read_text(encoding="utf-8"))
 
 
-def choose_desired_locations() -> list[str]:
-    """Ask for the user's preferred card location while Amazon searches London."""
+def choose_search_location() -> str:
+    """Ask what Amazon's Location search box should contain."""
     print("\n" + "=" * 64)
-    print("AMAZON JOB SEARCH METHOD - SEARCH SETTINGS")
-    print("Amazon Search jobs: EMPTY")
-    print("Amazon Location search: London")
+    print("AMAZON SEARCH LOCATION")
+    print("Enter the location for Amazon's Location search box.")
+    print("Example: London")
+    print("Press Enter to leave Amazon's Location search EMPTY.")
+    print("=" * 64)
+
+    search_location = input("Amazon search location: ").strip()
+    if search_location:
+        print(f"Amazon Location search: {search_location}")
+    else:
+        print("Amazon Location search: EMPTY")
+    return search_location
+
+
+def choose_desired_locations() -> list[str]:
+    """Ask for preferred locations/addresses printed on result cards."""
+    print("\n" + "=" * 64)
+    print("DESIRED CARD LOCATION FILTER")
     print("Target roles:")
     print("  - Delivery Station Warehouse Associate")
     print("  - Sortation Center Warehouse Associate")
     print("  - Fulfilment Center Warehouse Associate")
     print("  - Warehouse Operator")
     print("")
-    print("Now choose the location/area you actually want from those results.")
+    print("Choose the location/address you want from the job cards.")
     print("You can enter alternatives separated by commas.")
     print("Example: Wembley, Croydon, Dartford, DA1")
     print("Press Enter to accept ANY target-role job returned by the London search.")
@@ -319,6 +334,7 @@ def print_filter_summary(
     desired_locations: list[str],
     rules: dict,
     location_strategy: str = "first",
+    search_location: str = "",
 ) -> None:
     hours = rules.get("hours_preference", {"mode": "any"})
     days = rules.get("days_preference", {"mode": "any"})
@@ -326,7 +342,10 @@ def print_filter_summary(
 
     print("\n" + "=" * 64)
     print("SEARCH FILTER SUMMARY")
-    print("Amazon search location: London")
+    print(
+        "Amazon search location: "
+        + (search_location if search_location else "EMPTY")
+    )
     print(
         "Desired result location: "
         + (", ".join(desired_locations) if desired_locations else "ANY")
@@ -506,9 +525,8 @@ def find_desired_job(
 ):
     """Scan target-role cards and choose by the location printed on each card.
 
-    Amazon's search form is always:
-      Search jobs: empty
-      Location: London
+    Amazon's Search jobs field is empty. The Amazon Location search is configured
+    separately by the user and may also be empty.
 
     desired_locations are a separate local filter. They are matched only against
     the visible location/address extracted from each result card. The program
@@ -521,7 +539,7 @@ def find_desired_job(
     reported_total = read_reported_job_count(page)
     if reported_total is not None:
         log.info(
-            "Amazon reports %s job(s) found for the London search. "
+            "Amazon reports %s job(s) found for the current search. "
             "Scanning target-role cards and matching their visible card locations.",
             reported_total,
         )
@@ -716,7 +734,7 @@ def find_desired_job(
 
     if reported_total is not None and len(checked_keys) < reported_total:
         log.warning(
-            "Amazon reports %s total London-search result(s), but %s target-role "
+            "Amazon reports %s total search result(s), but %s target-role "
             "card(s) were discovered. Other job titles are intentionally ignored.",
             reported_total,
             len(checked_keys),
@@ -920,6 +938,7 @@ def review_shift_opportunities(
 def run() -> None:
     load_dotenv(ROOT / ".env")
     config = load_config()
+    search_location = choose_search_location()
     desired_locations = choose_desired_locations()
     location_strategy = choose_location_strategy(desired_locations)
 
@@ -930,6 +949,7 @@ def run() -> None:
         desired_locations,
         runtime_rules,
         location_strategy,
+        search_location,
     )
 
     setup_logging()
@@ -951,7 +971,11 @@ def run() -> None:
     log.info("Existing Method 1 code path is not being used or modified.")
     log.info("Check interval=%ss", interval)
     log.info(
-        "Desired locations=%s",
+        "Amazon search location=%s",
+        search_location if search_location else "EMPTY",
+    )
+    log.info(
+        "Desired card locations=%s",
         ", ".join(desired_locations) if desired_locations else "ANY",
     )
     log.info("Location strategy=%s", location_strategy)
@@ -976,13 +1000,13 @@ def run() -> None:
         page.set_default_timeout(timeout_ms)
 
         try:
-            wait_for_manual_login(page)
+            wait_for_manual_login(page, search_location)
             state = JobSearchState.JOB_SEARCH
 
             _notify(
                 "Amazon Job Search catcher is active.\n"
                 "Search jobs: EMPTY\n"
-                "Amazon location search: London\n"
+                f"Amazon location search: {search_location if search_location else 'EMPTY'}\n"
                 f"Desired result location: {', '.join(desired_locations) if desired_locations else 'ANY'}\n"
                 "Target roles: Delivery Station Warehouse Associate; "
                 "Sortation Center Warehouse Associate; "
@@ -1213,7 +1237,7 @@ def run() -> None:
                     interval,
                 )
                 time.sleep(interval)
-                open_job_search(page)
+                open_job_search(page, search_location)
 
         except KeyboardInterrupt:
             stop_reason = "stopped by user"
