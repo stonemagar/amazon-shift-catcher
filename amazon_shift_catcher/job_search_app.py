@@ -1000,11 +1000,38 @@ def run() -> None:
         page.set_default_timeout(timeout_ms)
 
         try:
-            wait_for_manual_login(page, search_location)
+            # Keep the user's main Amazon tab untouched during monitoring.
+            # A second tab in the same browser context shares the login/session,
+            # performs all search refreshes and scrolling in the background, and
+            # is brought to the foreground only when a matching job is found.
+            main_page = page
+            wait_for_manual_login(main_page, search_location)
+
+            scanner_page = main_page.context.new_page()
+            scanner_page.set_default_timeout(timeout_ms)
+
+            try:
+                main_page.bring_to_front()
+            except Exception:
+                pass
+
+            open_job_search(scanner_page, search_location)
+
+            try:
+                main_page.bring_to_front()
+            except Exception:
+                pass
+
+            page = scanner_page
             state = JobSearchState.JOB_SEARCH
+            log.info(
+                "Background scanner tab created. Main Amazon tab will remain "
+                "untouched until a matching job is found."
+            )
 
             _notify(
                 "Amazon Job Search catcher is active.\n"
+                "Background scanner tab: ON\n"
                 "Search jobs: EMPTY\n"
                 f"Amazon location search: {search_location if search_location else 'EMPTY'}\n"
                 f"Desired result location: {', '.join(desired_locations) if desired_locations else 'ANY'}\n"
@@ -1018,7 +1045,7 @@ def run() -> None:
 
             while True:
                 if page.is_closed():
-                    raise RuntimeError("The Amazon Jobs tab was closed.")
+                    raise RuntimeError("The background Amazon scanner tab was closed.")
 
                 if page_is_blocked(page):
                     state = JobSearchState.BLOCKED
@@ -1043,6 +1070,15 @@ def run() -> None:
 
                 if match is not None:
                     state = JobSearchState.JOB_FOUND
+
+                    # The scanner has found and opened the matching card. Bring
+                    # that tab forward now so the user sees the matched job and
+                    # the following application flow.
+                    try:
+                        page.bring_to_front()
+                    except Exception:
+                        pass
+
                     _save_screenshot(page, "job-search-match", log)
                     start_alarm()
 
