@@ -11,7 +11,6 @@ from playwright.sync_api import sync_playwright
 
 from .alarm import start_alarm, stop_alarm
 from .job_search_browser import (
-    card_requires_detail_location_check,
     click_application_stage,
     click_confirm_selection,
     detect_application_stage,
@@ -27,12 +26,10 @@ from .job_search_browser import (
     open_job_search,
     page_is_blocked,
     read_job_detail_location,
-    read_job_detail_locations,
     read_job_detail_text,
     read_reported_job_count,
     read_warehouse_job_cards,
     reset_job_search_scroll,
-    return_to_job_search,
     scroll_job_search_results,
     text_matches_location,
     wait_for_manual_login,
@@ -507,17 +504,25 @@ def find_desired_job(
     log,
     location_strategy: str = "first",
 ):
-    """Scan target warehouse-role cards and choose a matching location.
+    """Scan target-role cards and choose by the location printed on each card.
 
-    'first' preserves the fastest behavior: the first matching card wins.
-    'priority' scans the result set and prefers locations in the exact order
-    entered by the user. A rank-0 match can be opened immediately because no
-    lower-priority result can beat it.
+    Amazon's search form is always:
+      Search jobs: empty
+      Location: London
+
+    desired_locations are a separate local filter. They are matched only against
+    the visible location/address extracted from each result card. The program
+    does not put these desired locations into Amazon's search box.
+
+    'first' opens the first card whose visible card location matches.
+    'priority' scans all target-role cards and prefers desired locations in the
+    order entered by the user.
     """
     reported_total = read_reported_job_count(page)
     if reported_total is not None:
         log.info(
-            "Amazon reports %s job(s) found. Scanning the full result page.",
+            "Amazon reports %s job(s) found for the London search. "
+            "Scanning target-role cards and matching their visible card locations.",
             reported_total,
         )
 
@@ -533,8 +538,6 @@ def find_desired_job(
     while scan_steps < max_scan_steps:
         cards = read_warehouse_job_cards(page)
 
-        # Amazon sometimes reports results before lazy-loaded cards are mounted.
-        # Retry briefly instead of treating a temporary empty render as a full scan.
         if not cards and reported_total:
             for _retry in range(3):
                 time.sleep(0.4)
@@ -564,28 +567,20 @@ def find_desired_job(
 
             log.info(
                 "%s unchecked target-role card(s) are visible; "
-                "%s card(s) have actually been checked so far.",
+                "%s card(s) have been checked so far.",
                 len(new_cards),
                 len(checked_keys),
             )
-
-            restart_scan = False
 
             for candidate in new_cards:
                 key = job_candidate_key(candidate)
                 if key in checked_keys:
                     continue
 
-                # Mark only the card we are about to process. If an ambiguous
-                # card navigates away and forces a restart, later cards in this
-                # batch remain unchecked and will be processed on the next pass.
                 checked_keys.add(key)
                 card_number = len(checked_keys)
-                total_label = (
-                    str(reported_total)
-                    if reported_total is not None
-                    else "?"
-                )
+                total_label = str(reported_total) if reported_total is not None else "?"
+
                 log.info(
                     "Checking target-role card %s/%s on results page %s: %s",
                     card_number,
@@ -594,169 +589,83 @@ def find_desired_job(
                     candidate.text[:350] or "<no readable card text>",
                 )
 
-                location_text = candidate.location or candidate.text
-                match_rank = location_match_rank(
-                    location_text,
-                    desired_locations,
-                )
-
-                if match_rank is not None:
-                    if location_strategy != "priority" or match_rank == 0:
-                        log.info(
-                            "Desired location matched directly on the result "
-                            "card. Opening this match."
-                        )
-                        open_job_candidate(page, candidate)
-
-                        if page_is_blocked(page):
-                            raise RuntimeError(
-                                "Amazon returned a 403 / request-blocked page."
-                            )
-
-                        detail_location = read_job_detail_location(page)
-                        if detail_location:
-                            added = save_unique_locations(
-                                LOCATION_STORE,
-                                [detail_location],
-                            )
-                            if added:
-                                log.info(
-                                    "Saved new detailed job location: %s",
-                                    detail_location,
-                                )
-
-                        detail_text = read_job_detail_text(page)
-                        apply_button = find_apply_button(page)
-                        if apply_button is None:
-                            log.warning(
-                                "Location matched, but no visible Apply button "
-                                "was found on the details page."
-                            )
-                        return {
-                            "card_text": candidate.text,
-                            "detail_text": detail_text,
-                            "apply_visible": apply_button is not None,
-                            "url": page.url,
-                        }
-
-                    if (
-                        best_match is None
-                        or match_rank < best_match["rank"]
-                    ):
-                        best_match = {
-                            "key": job_candidate_key(candidate),
-                            "rank": match_rank,
-                            "detail_text": "",
-                            "page": current_page,
-                        }
-                        log.info(
-                            "Stored current best location match: %s "
-                            "(priority %s). Continuing scan for a higher "
-                            "priority location.",
-                            candidate.location or candidate.text[:120],
-                            match_rank + 1,
-                        )
-                    continue
-
-                if not card_requires_detail_location_check(candidate.text):
+                if desired_locations and not candidate.location:
                     log.info(
-                        "Visible card location does not match. "
-                        "Skipping this card without opening it."
+                        "Skipping card because it has no readable location/address "
+                        "printed on the card. Desired card location(s): %s",
+                        ", ".join(desired_locations),
                     )
                     continue
 
-                log.info(
-                    "Card says multiple on site locations available. "
-                    "Opening it to check the detailed location."
-                )
-                open_job_candidate(page, candidate)
-
-                if page_is_blocked(page):
-                    raise RuntimeError(
-                        "Amazon returned a 403 / request-blocked page."
-                    )
-
-                detail_text = read_job_detail_text(page)
-                detail_locations = read_job_detail_locations(
-                    page,
+                match_rank = location_match_rank(
+                    candidate.location or "",
                     desired_locations,
                 )
 
-                if detail_locations:
-                    added = save_unique_locations(
-                        LOCATION_STORE,
-                        detail_locations,
+                if match_rank is None:
+                    log.info(
+                        "Card location does not match desired location(s). "
+                        "Card location=%s | Desired=%s",
+                        candidate.location or "<none>",
+                        ", ".join(desired_locations) if desired_locations else "ANY",
                     )
-                    if added:
-                        log.info(
-                            "Saved new detailed job location(s): %s",
-                            ", ".join(added),
-                        )
-                    else:
-                        log.info(
-                            "Detailed job location(s) already known: %s",
-                            ", ".join(detail_locations),
-                        )
-                else:
-                    log.warning(
-                        "Multiple-location job opened, but no detailed location "
-                        "could be extracted from the loaded job page."
+                    continue
+
+                if location_strategy != "priority" or match_rank == 0:
+                    log.info(
+                        "Desired location matched the address printed on the card: %s. "
+                        "Opening this target-role card.",
+                        candidate.location or "<any>",
                     )
+                    open_job_candidate(page, candidate)
 
-                detail_source = " ".join(detail_locations) or detail_text
-                detail_rank = location_match_rank(
-                    detail_source,
-                    desired_locations,
-                )
-
-                if detail_rank is not None:
-                    if location_strategy != "priority" or detail_rank == 0:
-                        apply_button = find_apply_button(page)
-                        if apply_button is None:
-                            log.warning(
-                                "Detailed location matched, but no visible Apply "
-                                "button was found."
-                            )
-                        return {
-                            "card_text": candidate.text,
-                            "detail_text": detail_text,
-                            "apply_visible": apply_button is not None,
-                            "url": page.url,
-                        }
-
-                    if (
-                        best_match is None
-                        or detail_rank < best_match["rank"]
-                    ):
-                        best_match = {
-                            "key": key,
-                            "rank": detail_rank,
-                            "detail_text": detail_text,
-                            "page": current_page,
-                        }
-                        log.info(
-                            "Stored current best detailed location match at "
-                            "priority %s. Continuing scan.",
-                            detail_rank + 1,
-                        )
-
-                log.info(
-                    "Returning to search results and continuing the full scan."
-                )
-                return_to_job_search(page)
-                if current_page > 1:
-                    if not go_to_job_results_page(page, current_page):
+                    if page_is_blocked(page):
                         raise RuntimeError(
-                            f"Could not return to Amazon results page {current_page} "
-                            "after checking a multiple-location card."
+                            "Amazon returned a 403 / request-blocked page."
                         )
-                reset_job_search_scroll(page)
-                restart_scan = True
-                break
 
-            if restart_scan:
-                scan_steps += 1
-                continue
+                    detail_location = read_job_detail_location(page)
+                    if detail_location:
+                        added = save_unique_locations(
+                            LOCATION_STORE,
+                            [detail_location],
+                        )
+                        if added:
+                            log.info(
+                                "Saved detailed job location after opening match: %s",
+                                detail_location,
+                            )
+
+                    detail_text = read_job_detail_text(page)
+                    apply_button = find_apply_button(page)
+                    if apply_button is None:
+                        log.warning(
+                            "Card location matched, but no visible Apply button "
+                            "was found on the details page."
+                        )
+
+                    return {
+                        "card_text": candidate.text,
+                        "card_location": candidate.location,
+                        "detail_text": detail_text,
+                        "apply_visible": apply_button is not None,
+                        "url": page.url,
+                    }
+
+                if best_match is None or match_rank < best_match["rank"]:
+                    best_match = {
+                        "key": key,
+                        "rank": match_rank,
+                        "detail_text": "",
+                        "page": current_page,
+                        "card_location": candidate.location,
+                    }
+                    log.info(
+                        "Stored current best visible-card location match: %s "
+                        "(priority %s). Continuing scan for a higher-priority location.",
+                        candidate.location,
+                        match_rank + 1,
+                    )
 
         else:
             no_new_batches += 1
@@ -777,9 +686,6 @@ def find_desired_job(
         if final_new:
             continue
 
-        # The Amazon job list is paginated. After exhausting the current page,
-        # move to page 2, page 3, etc. instead of treating page 1 as the full
-        # result set.
         next_page = current_page + 1
         if go_to_next_job_results_page(page, current_page):
             current_page = next_page
@@ -794,8 +700,8 @@ def find_desired_job(
             break
 
     log.info(
-        "Finished full result scan across %s page(s). %s unique Warehouse "
-        "Associate card(s) were discovered and checked.",
+        "Finished full result scan across %s page(s). %s unique target-role "
+        "card(s) were discovered and checked.",
         current_page,
         len(checked_keys),
     )
@@ -803,18 +709,15 @@ def find_desired_job(
     if best_match is not None:
         selected_location = desired_locations[best_match["rank"]]
         log.info(
-            "Full scan complete. Choosing highest-priority discovered "
-            "location match: %s",
+            "Full scan complete. Choosing highest-priority card-location match: %s",
             selected_location,
         )
         return _open_ranked_job_match(page, best_match, log)
 
     if reported_total is not None and len(checked_keys) < reported_total:
         log.warning(
-            "Amazon reports %s total job result(s), but %s target warehouse-role "
-            "card(s) were discovered. Other role titles are intentionally ignored; "
-            "if more target-role cards are visibly present, send the card titles or "
-            "a screenshot so the title/card detector can be adjusted.",
+            "Amazon reports %s total London-search result(s), but %s target-role "
+            "card(s) were discovered. Other job titles are intentionally ignored.",
             reported_total,
             len(checked_keys),
         )
