@@ -1061,12 +1061,27 @@ def run() -> None:
                     break
 
                 state = JobSearchState.CHECKING_JOB
+
+                # Some Chromium/Brave navigations can make the automated tab
+                # active again. Re-assert the user's main tab immediately before
+                # every scan so scrolling stays out of sight.
+                try:
+                    main_page.bring_to_front()
+                except Exception:
+                    pass
+
                 match = find_desired_job(
                     page,
                     desired_locations,
                     log,
                     location_strategy,
                 )
+
+                if match is None:
+                    try:
+                        main_page.bring_to_front()
+                    except Exception:
+                        pass
 
                 if match is not None:
                     state = JobSearchState.JOB_FOUND
@@ -1274,6 +1289,13 @@ def run() -> None:
                 )
                 time.sleep(interval)
                 open_job_search(page, search_location)
+
+                # page.goto() on the scanner can steal focus in some Brave
+                # builds, so restore the user's tab after every refresh.
+                try:
+                    main_page.bring_to_front()
+                except Exception:
+                    pass
 
         except KeyboardInterrupt:
             stop_reason = "stopped by user"
