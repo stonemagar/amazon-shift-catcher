@@ -10,10 +10,9 @@ from .browser import page_has_security_challenge
 
 log = logging.getLogger(__name__)
 
-JOB_SEARCH_LOCATION = "London"
 JOB_SEARCH_URL = (
     "https://www.jobsatamazon.co.uk/app#/jobSearch?"
-    "query=&postal=London&locale=en-GB"
+    "query=&postal=&locale=en-GB"
 )
 
 # Method 2 deliberately leaves Amazon's "Search jobs" box empty and uses
@@ -794,8 +793,8 @@ def _clear_job_search_if_available(page: Page) -> None:
             continue
 
 
-def _fill_london_location_if_available(page: Page) -> None:
-    """Set Amazon's location/postcode search box to London."""
+def _fill_search_location_if_available(page: Page, search_location: str) -> None:
+    """Set Amazon's location/postcode search box, or leave it empty."""
     candidates = [
         page.get_by_role(
             "textbox",
@@ -820,11 +819,11 @@ def _fill_london_location_if_available(page: Page) -> None:
         except Exception:
             current = ""
 
-        if current.casefold() == JOB_SEARCH_LOCATION.casefold():
+        if current.casefold() == search_location.casefold():
             return
 
         try:
-            field.fill(JOB_SEARCH_LOCATION, timeout=2500)
+            field.fill(search_location, timeout=2500)
             page.keyboard.press("Enter")
             page.wait_for_timeout(700)
             return
@@ -851,8 +850,8 @@ def _select_all_jobs_if_available(page: Page) -> None:
             continue
 
 
-def open_job_search(page: Page) -> None:
-    """Open the London job search with an empty job-keyword field."""
+def open_job_search(page: Page, search_location: str = "") -> None:
+    """Open job search with an empty job-keyword field and chosen location."""
     page.goto(JOB_SEARCH_URL, wait_until="domcontentloaded")
 
     if page_has_security_challenge(page):
@@ -863,7 +862,7 @@ def open_job_search(page: Page) -> None:
 
     _select_all_jobs_if_available(page)
     _clear_job_search_if_available(page)
-    _fill_london_location_if_available(page)
+    _fill_search_location_if_available(page, search_location.strip())
     page.wait_for_timeout(700)
 
 
@@ -1130,20 +1129,20 @@ def read_job_detail_locations(
     return found
 
 
-def return_to_job_search(page: Page) -> None:
-    """Return reliably to the London target-role result page."""
-    open_job_search(page)
+def return_to_job_search(page: Page, search_location: str = "") -> None:
+    """Return reliably to the configured target-role result page."""
+    open_job_search(page, search_location)
 
 
-def wait_for_manual_login(page: Page) -> None:
+def wait_for_manual_login(page: Page, search_location: str = "") -> None:
     """Pause while the user signs in and completes any verification manually."""
-    open_job_search(page)
+    open_job_search(page, search_location)
 
     print("\n" + "=" * 72)
     print("AMAZON JOB SEARCH METHOD - MANUAL LOGIN")
     print("1. Use the Brave window to sign in to Amazon Jobs.")
     print("2. Complete any OTP, CAPTCHA, security or identity check manually.")
-    print("3. Return to the London job-search results page.")
+    print("3. Return to the configured job-search results page.")
     print("4. Return to this terminal and press Enter.")
     print("=" * 72 + "\n")
 
@@ -1157,4 +1156,4 @@ def wait_for_manual_login(page: Page) -> None:
             "Amazon still shows a security/verification step. Complete it manually first."
         )
 
-    open_job_search(page)
+    open_job_search(page, search_location)
