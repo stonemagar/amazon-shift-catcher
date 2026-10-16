@@ -102,18 +102,31 @@ def load_config() -> dict:
 
 
 def choose_desired_locations() -> list[str]:
-    """Method 2 now uses London as the fixed Amazon location search."""
-    selected = ["London"]
+    """Ask for the user's preferred card location while Amazon searches London."""
     print("\n" + "=" * 64)
     print("AMAZON JOB SEARCH METHOD - SEARCH SETTINGS")
-    print("Search jobs: EMPTY")
-    print("Location: London")
+    print("Amazon Search jobs: EMPTY")
+    print("Amazon Location search: London")
     print("Target roles:")
     print("  - Delivery Station Warehouse Associate")
     print("  - Sortation Center Warehouse Associate")
     print("  - Fulfilment Center Warehouse Associate")
     print("  - Warehouse Operator")
+    print("")
+    print("Now choose the location/area you actually want from those results.")
+    print("You can enter alternatives separated by commas.")
+    print("Example: Wembley, Croydon, Dartford, DA1")
+    print("Press Enter to accept ANY target-role job returned by the London search.")
     print("=" * 64)
+
+    raw = input("Desired location(s): ").strip()
+    selected = normalise_location_terms(raw)
+
+    if selected:
+        print("Desired location filter: " + ", ".join(selected))
+    else:
+        print("Desired location filter: ANY")
+
     return selected
 
 
@@ -316,8 +329,9 @@ def print_filter_summary(
 
     print("\n" + "=" * 64)
     print("SEARCH FILTER SUMMARY")
+    print("Amazon search location: London")
     print(
-        "Location: "
+        "Desired result location: "
         + (", ".join(desired_locations) if desired_locations else "ANY")
     )
 
@@ -1065,7 +1079,8 @@ def run() -> None:
             _notify(
                 "Amazon Job Search catcher is active.\n"
                 "Search jobs: EMPTY\n"
-                "Location: London\n"
+                "Amazon location search: London\n"
+                f"Desired result location: {', '.join(desired_locations) if desired_locations else 'ANY'}\n"
                 "Target roles: Delivery Station Warehouse Associate; "
                 "Sortation Center Warehouse Associate; "
                 "Fulfilment Center Warehouse Associate; Warehouse Operator\n"
