@@ -936,6 +936,34 @@ def open_job_search(page: Page, search_location: str = "") -> None:
     page.wait_for_timeout(700)
 
 
+def refresh_job_search(page: Page, search_location: str = "") -> None:
+    """Perform a real browser refresh of the Amazon job-search page.
+
+    This is intentionally different from navigating to the search URL again:
+    Playwright reloads the currently open page, equivalent to the browser's
+    refresh action. After reload, restore the configured empty keyword field and
+    Amazon location value.
+    """
+    try:
+        page.reload(wait_until="domcontentloaded", timeout=10000)
+    except Exception:
+        # If Amazon's SPA is not currently on a usable job-search page, recover
+        # once by reopening the configured search URL.
+        open_job_search(page, search_location)
+        return
+
+    if page_has_security_challenge(page):
+        raise RuntimeError("Amazon security/verification challenge detected.")
+
+    if page_is_blocked(page):
+        raise RuntimeError("Amazon returned a 403 / request-blocked page.")
+
+    _select_all_jobs_if_available(page)
+    _clear_job_search_if_available(page)
+    _fill_search_location_if_available(page, search_location.strip())
+    page.wait_for_timeout(500)
+
+
 def open_job_candidate(page: Page, candidate: JobCandidate) -> None:
     """Open one result card without clicking the Apply button."""
     previous_url = page.url
