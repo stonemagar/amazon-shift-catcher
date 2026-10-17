@@ -650,6 +650,79 @@ def _notify(body: str, **kwargs) -> None:
         pass
 
 
+def _is_403_error(exc: Exception) -> bool:
+    text = str(exc).casefold()
+    return "403" in text or "request-blocked" in text or "request blocked" in text
+
+
+def _wait_for_manual_403_recovery(page, search_location: str, log) -> bool:
+    """Keep Method 2 alive on a 403, but require manual recovery.
+
+    The program does not try to bypass or hammer a blocked page. It pauses,
+    alerts the user, and resumes only after the user has manually cleared the
+    block in Brave and confirms from the terminal.
+    """
+    _save_screenshot(page, "job-search-403", log)
+    start_alarm()
+    _notify(
+        "Amazon Job Search returned a 403 / request-blocked page. "
+        "Method 2 is PAUSED, not stopped. Resolve the page manually in Brave, "
+        "then return to the terminal to resume.",
+        title="Amazon Job Search paused on 403",
+        priority=5,
+    )
+    log.warning(
+        "403 / request-blocked page detected. Method 2 is paused for manual recovery."
+    )
+
+    while True:
+        print("\nAMAZON 403 / REQUEST BLOCKED")
+        print("Method 2 is PAUSED; it has not exited.")
+        print("Use Brave manually and wait until Amazon Jobs is accessible again.")
+        print("Do not close the browser.")
+        choice = input(
+            "Press Enter after the block is cleared, or type Q to stop: "
+        ).strip().casefold()
+
+        if choice in {"q", "quit", "stop"}:
+            stop_alarm()
+            log.info("User chose to stop while paused on 403.")
+            return False
+
+        if page.is_closed():
+            stop_alarm()
+            raise RuntimeError("The Amazon Jobs tab was closed during 403 recovery.")
+
+        if page_is_blocked(page):
+            log.warning("Amazon still shows the 403 / request-blocked page.")
+            print("Amazon is still blocked. Clear it manually in Brave, then try again.")
+            continue
+
+        try:
+            open_job_search(page, search_location)
+        except Exception as exc:
+            if _is_403_error(exc):
+                log.warning("403 returned again while verifying recovery.")
+                print("Amazon returned 403 again. Wait and clear it manually before retrying.")
+                continue
+            stop_alarm()
+            raise
+
+        if page_is_blocked(page):
+            log.warning("403 returned again after reopening the search page.")
+            print("Amazon is still blocked. Wait and clear it manually before retrying.")
+            continue
+
+        stop_alarm()
+        log.info("403 cleared manually. Resuming Method 2 monitoring.")
+        _notify(
+            "Amazon Jobs is accessible again. Method 2 monitoring has resumed.",
+            title="Amazon Job Search resumed",
+            priority=3,
+        )
+        return True
+
+
 def _find_candidate_by_key(page, wanted_key: str):
     """Re-find a lazy-loaded job card by its stable key."""
     reset_job_search_scroll(page)
@@ -1363,30 +1436,60 @@ def run() -> None:
                 # pressing the browser Refresh button.
                 if not first_scan:
                     log.info("Refreshing Amazon job-search page now.")
-                    refresh_job_search(page, search_location)
+                    try:
+                        refresh_job_search(page, search_location)
+                    except Exception as exc:
+                        if not _is_403_error(exc):
+                            raise
+                        state = JobSearchState.BLOCKED
+                        if not _wait_for_manual_403_recovery(
+                            page,
+                            search_location,
+                            log,
+                        ):
+                            stop_reason = "stopped by user during 403 pause"
+                            break
+                        first_scan = True
+                        state = JobSearchState.JOB_SEARCH
+                        continue
                 first_scan = False
 
                 if page_is_blocked(page):
                     state = JobSearchState.BLOCKED
-                    _save_screenshot(page, "job-search-403", log)
-                    start_alarm()
-                    _notify(
-                        "Amazon Job Search returned a 403 / request-blocked page. "
-                        "Automation has stopped. Check Brave manually.",
-                        title="Amazon Job Search blocked",
-                        priority=5,
-                    )
-                    stop_reason = "403 blocked"
-                    break
+                    if not _wait_for_manual_403_recovery(
+                        page,
+                        search_location,
+                        log,
+                    ):
+                        stop_reason = "stopped by user during 403 pause"
+                        break
+                    first_scan = True
+                    state = JobSearchState.JOB_SEARCH
+                    continue
 
                 state = JobSearchState.CHECKING_JOB
-                match = find_desired_job(
-                    page,
-                    desired_locations,
-                    log,
-                    location_strategy,
-                    search_location,
-                )
+                try:
+                    match = find_desired_job(
+                        page,
+                        desired_locations,
+                        log,
+                        location_strategy,
+                        search_location,
+                    )
+                except Exception as exc:
+                    if not _is_403_error(exc):
+                        raise
+                    state = JobSearchState.BLOCKED
+                    if not _wait_for_manual_403_recovery(
+                        page,
+                        search_location,
+                        log,
+                    ):
+                        stop_reason = "stopped by user during 403 pause"
+                        break
+                    first_scan = True
+                    state = JobSearchState.JOB_SEARCH
+                    continue
 
                 if match is not None:
                     state = JobSearchState.JOB_FOUND
