@@ -9,7 +9,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright
 
-from .alarm import start_alarm, stop_alarm
+from .alarm import play_alarm_once, start_alarm, stop_alarm
 from .job_search_browser import (
     card_requires_detail_location_check,
     click_application_stage,
@@ -670,7 +670,7 @@ def _recover_from_403(page, log) -> bool:
     attempt = 0
 
     _save_screenshot(page, "job-search-403", log)
-    start_alarm()
+    play_alarm_once()
     log.warning(
         "403 / request-blocked page detected. Method 2 monitoring is PAUSED."
     )
