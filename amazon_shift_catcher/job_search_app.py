@@ -658,6 +658,26 @@ def _is_403_error(exc: Exception) -> bool:
     return "403" in text or "request-blocked" in text or "request blocked" in text
 
 
+def _manual_403_check_requested() -> bool:
+    """Return True when the user presses C in the Windows terminal.
+
+    This is non-blocking, so automatic 403 recovery keeps running normally.
+    """
+    try:
+        import msvcrt
+    except ImportError:
+        return False
+
+    try:
+        if not msvcrt.kbhit():
+            return False
+        key = msvcrt.getwch()
+    except Exception:
+        return False
+
+    return key.casefold() == "c"
+
+
 def _recover_from_403(page, log) -> bool:
     """Use Method 1's quiet 403 recovery pattern for Method 2.
 
@@ -684,6 +704,14 @@ def _recover_from_403(page, log) -> bool:
         priority=5,
     )
 
+    print("\n403 recovery mode is active.")
+    print(
+        "You can inspect/refresh the Amazon page manually in Brave at any time."
+    )
+    print(
+        "Press C in this terminal at any time to check whether the 403 is still present."
+    )
+
     while True:
         log.warning(
             "403 recovery wait: no automatic reload for up to %s seconds. "
@@ -698,6 +726,41 @@ def _recover_from_403(page, log) -> bool:
                 stop_alarm()
                 log.error("Amazon Jobs tab was closed during 403 recovery.")
                 return False
+
+            if _manual_403_check_requested():
+                try:
+                    if page_is_blocked(page):
+                        remaining = max(
+                            0,
+                            int(deadline - time.monotonic()),
+                        )
+                        print(
+                            "Manual check: 403 is STILL PRESENT. "
+                            f"Next automatic recovery test in about {remaining}s."
+                        )
+                        log.info(
+                            "User manual 403 check: block is still present."
+                        )
+                    elif page_has_security_challenge(page):
+                        print(
+                            "Manual check: 403 is gone, but Amazon is showing "
+                            "a security/verification step."
+                        )
+                        log.info(
+                            "User manual 403 check: block gone; "
+                            "security/verification page visible."
+                        )
+                    else:
+                        print(
+                            "Manual check: 403 is NO LONGER PRESENT. "
+                            "Method 2 will resume automatically."
+                        )
+                        log.info(
+                            "User manual 403 check: block is no longer present."
+                        )
+                except Exception as exc:
+                    print(f"Manual check could not read the page: {exc}")
+                    log.warning("Manual 403 check failed: %s", exc)
 
             if not page_is_blocked(page):
                 try:
