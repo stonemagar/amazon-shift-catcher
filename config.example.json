@@ -1,6 +1,7 @@
 {
   "my_jobs_url": "https://www.jobsatamazon.co.uk/app#/myapplications",
   "check_interval_seconds": 10,
+  "job_search_check_interval_seconds": 5,
   "navigation_timeout_seconds": 30,
   "job_id": "JOB-UK-0000000362",
   "rules": {
