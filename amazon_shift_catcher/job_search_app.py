@@ -11,6 +11,7 @@ from playwright.sync_api import sync_playwright
 
 from .alarm import start_alarm, stop_alarm
 from .job_search_browser import (
+    card_requires_detail_location_check,
     click_application_stage,
     click_confirm_selection,
     detect_application_stage,
@@ -26,6 +27,7 @@ from .job_search_browser import (
     open_job_search,
     page_is_blocked,
     read_job_detail_location,
+    read_job_detail_locations,
     read_job_detail_text,
     read_reported_job_count,
     read_warehouse_job_cards,
@@ -734,6 +736,7 @@ def find_desired_job(
     desired_locations: list[str],
     log,
     location_strategy: str = "first",
+    search_location: str = "",
 ):
     """Scan target-role cards and choose by the location printed on each card.
 
@@ -779,6 +782,7 @@ def find_desired_job(
 
         if new_cards:
             no_new_batches = 0
+            restart_scan = False
             visible_locations = [
                 candidate.location
                 for candidate in new_cards
@@ -820,12 +824,120 @@ def find_desired_job(
                 )
 
                 if desired_locations and not candidate.location:
+                    if not card_requires_detail_location_check(candidate.text):
+                        log.info(
+                            "Skipping card because it has no readable location/address "
+                            "printed on the card. Desired card location(s): %s",
+                            ", ".join(desired_locations),
+                        )
+                        continue
+
+                    # "Multiple on-site locations available" cannot be filtered
+                    # from the result card itself. Open it briefly, inspect only
+                    # explicit location/address data, then return immediately if
+                    # it does not match. Keep this check short so it does not
+                    # materially slow the scan cycle.
                     log.info(
-                        "Skipping card because it has no readable location/address "
-                        "printed on the card. Desired card location(s): %s",
+                        "Multi-location card found. Running quick location check "
+                        "against: %s",
                         ", ".join(desired_locations),
                     )
-                    continue
+                    open_job_candidate(page, candidate)
+
+                    if page_is_blocked(page):
+                        raise RuntimeError(
+                            "Amazon returned a 403 / request-blocked page."
+                        )
+
+                    detail_locations = read_job_detail_locations(
+                        page,
+                        [],
+                        timeout_seconds=1.5,
+                    )
+                    if detail_locations:
+                        added = save_unique_locations(
+                            LOCATION_STORE,
+                            detail_locations,
+                        )
+                        if added:
+                            log.info(
+                                "Saved new multi-location detail location(s): %s",
+                                ", ".join(added),
+                            )
+
+                    detail_rank = location_match_rank(
+                        " ".join(detail_locations),
+                        desired_locations,
+                    )
+
+                    if detail_rank is not None:
+                        log.info(
+                            "Multi-location card matched desired location in "
+                            "job details: %s",
+                            ", ".join(detail_locations),
+                        )
+
+                        if (
+                            location_strategy != "priority"
+                            or detail_rank == 0
+                        ):
+                            detail_text = read_job_detail_text(page)
+                            apply_button = find_apply_button(page)
+                            return {
+                                "card_text": candidate.text,
+                                "card_location": "Multiple on-site locations available",
+                                "detail_text": detail_text,
+                                "apply_visible": apply_button is not None,
+                                "url": page.url,
+                            }
+
+                        if (
+                            best_match is None
+                            or detail_rank < best_match["rank"]
+                        ):
+                            best_match = {
+                                "key": key,
+                                "rank": detail_rank,
+                                "detail_text": "",
+                                "page": current_page,
+                                "card_location": (
+                                    "Multiple on-site locations available"
+                                ),
+                            }
+                            log.info(
+                                "Stored multi-location match at priority %s; "
+                                "continuing scan for a higher-priority location.",
+                                detail_rank + 1,
+                            )
+                    else:
+                        log.info(
+                            "Multi-location details did not match desired "
+                            "location(s). Found=%s",
+                            ", ".join(detail_locations) if detail_locations else "<none>",
+                        )
+
+                    # Fast return to the same result set. Browser back is quicker
+                    # than rebuilding the full search; fall back to a fresh search
+                    # only if Amazon's SPA history does not cooperate.
+                    try:
+                        page.go_back(
+                            wait_until="domcontentloaded",
+                            timeout=3500,
+                        )
+                        page.wait_for_timeout(150)
+                    except Exception:
+                        open_job_search(page, search_location)
+
+                    if current_page > 1:
+                        if not go_to_job_results_page(page, current_page):
+                            raise RuntimeError(
+                                f"Could not return to Amazon results page {current_page} "
+                                "after checking a multi-location card."
+                            )
+
+                    reset_job_search_scroll(page)
+                    restart_scan = True
+                    break
 
                 match_rank = location_match_rank(
                     candidate.location or "",
@@ -896,6 +1008,10 @@ def find_desired_job(
                         candidate.location,
                         match_rank + 1,
                     )
+
+            if restart_scan:
+                scan_steps += 1
+                continue
 
         else:
             no_new_batches += 1
@@ -1267,6 +1383,7 @@ def run() -> None:
                     desired_locations,
                     log,
                     location_strategy,
+                    search_location,
                 )
 
                 if match is not None:
