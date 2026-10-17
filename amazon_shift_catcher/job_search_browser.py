@@ -51,6 +51,7 @@ class JobCandidate:
     card: object
     text: str
     location: str | None
+    identity: str = ""
 
 
 def extract_reported_job_count(text: str) -> int | None:
@@ -69,8 +70,11 @@ def read_reported_job_count(page: Page) -> int | None:
 
 def job_candidate_key(candidate: JobCandidate) -> str:
     """Return a stable key for one result card across scroll/lazy-load cycles."""
+    if candidate.identity:
+        return candidate.identity
+
     try:
-        link = candidate.card.locator("a").first
+        link = candidate.card.locator("a[href]").first
         if link.count():
             href = link.get_attribute("href")
             if href:
@@ -79,6 +83,37 @@ def job_candidate_key(candidate: JobCandidate) -> str:
         pass
 
     return "text:" + " ".join(candidate.text.split()).casefold()
+
+
+def _job_card_identity(card, text: str, ordinal: int) -> str:
+    """Identify cards individually, even when their visible text is identical.
+
+    Multi-location result cards can have exactly the same title, metadata and
+    'Multiple on-site locations available' text. Prefer the job link or a DOM
+    identifier so those separate cards are never collapsed into one.
+    """
+    try:
+        link = card.locator("a[href]").first
+        if link.count():
+            href = link.get_attribute("href")
+            if href:
+                return "href:" + href.strip().casefold()
+    except Exception:
+        pass
+
+    for attr in ("data-job-id", "data-jobid", "data-id", "id", "data-testid"):
+        try:
+            value = card.get_attribute(attr)
+        except Exception:
+            value = None
+        if value:
+            return f"{attr}:" + value.strip().casefold()
+
+    # Last resort: preserve separate visible cards instead of deduplicating
+    # identical multi-location text. The ordinal is stable enough within one
+    # result-page render and avoids missing a card.
+    compact = " ".join(text.split()).casefold()
+    return f"textpos:{compact}|{ordinal}"
 
 
 def reset_job_search_scroll(page: Page) -> None:
@@ -553,10 +588,10 @@ def read_warehouse_job_cards(page: Page) -> list[JobCandidate]:
             raw_card_text = text
         location = extract_card_location(raw_card_text)
 
-        signature = " ".join(text.split()).casefold()
-        if not signature or signature in seen:
+        identity = _job_card_identity(card, text, index)
+        if not identity or identity in seen:
             continue
-        seen.add(signature)
+        seen.add(identity)
 
         cards.append(
             JobCandidate(
@@ -565,6 +600,7 @@ def read_warehouse_job_cards(page: Page) -> list[JobCandidate]:
                 card=card,
                 text=text,
                 location=location,
+                identity=identity,
             )
         )
 
