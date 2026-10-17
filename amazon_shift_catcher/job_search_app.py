@@ -31,6 +31,7 @@ from .job_search_browser import (
     read_job_detail_text,
     read_reported_job_count,
     read_warehouse_job_cards,
+    refresh_job_search,
     reset_job_search_scroll,
     scroll_job_search_results,
     text_matches_location,
@@ -1357,11 +1358,12 @@ def run() -> None:
                 if page.is_closed():
                     raise RuntimeError("The Amazon Jobs tab was closed.")
 
-                # Refresh at the start of each later cycle so navigation and
-                # rendering time count inside the target cycle instead of being
-                # added after a full sleep.
+                # Perform an actual browser refresh at the start of
+                # each later cycle. This uses page.reload(), equivalent to
+                # pressing the browser Refresh button.
                 if not first_scan:
-                    open_job_search(page, search_location)
+                    log.info("Refreshing Amazon job-search page now.")
+                    refresh_job_search(page, search_location)
                 first_scan = False
 
                 if page_is_blocked(page):
