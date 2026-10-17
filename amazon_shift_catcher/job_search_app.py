@@ -690,6 +690,7 @@ def _recover_from_403(page, log) -> bool:
     attempt = 0
 
     _save_screenshot(page, "job-search-403", log)
+    stop_alarm()
     play_alarm_once()
     log.warning(
         "403 / request-blocked page detected. Method 2 monitoring is PAUSED."
