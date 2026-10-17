@@ -25,6 +25,7 @@ from .job_search_browser import (
     normalise_location_terms,
     open_job_candidate,
     open_job_search,
+    page_has_security_challenge,
     page_is_blocked,
     read_job_detail_location,
     read_job_detail_locations,
@@ -60,6 +61,8 @@ LOG_DIR = ROOT / "logs"
 SCREENSHOT_DIR = ROOT / "screenshots"
 LOCATION_STORE = ROOT / "data" / "job_search_locations.json"
 LAST_SETTINGS_STORE = ROOT / "data" / "job_search_last_settings.json"
+BLOCKED_RETRY_SECONDS = 60
+PASSIVE_RECOVERY_POLL_SECONDS = 1.0
 
 
 class JobSearchState(str, Enum):
@@ -655,73 +658,146 @@ def _is_403_error(exc: Exception) -> bool:
     return "403" in text or "request-blocked" in text or "request blocked" in text
 
 
-def _wait_for_manual_403_recovery(page, search_location: str, log) -> bool:
-    """Keep Method 2 alive on a 403, but require manual recovery.
+def _recover_from_403(page, log) -> bool:
+    """Use Method 1's quiet 403 recovery pattern for Method 2.
 
-    The program does not try to bypass or hammer a blocked page. It pauses,
-    alerts the user, and resumes only after the user has manually cleared the
-    block in Brave and confirms from the terminal.
+    Normal scanning/refreshing pauses on a 403. The current page is inspected
+    passively once per second, but no automatic request is made for 60 seconds.
+    If the block is still present after that quiet period, perform one test
+    reload. Repeat until the block clears, then resume normal monitoring.
     """
+    started_monotonic = time.monotonic()
+    attempt = 0
+
     _save_screenshot(page, "job-search-403", log)
     start_alarm()
-    _notify(
-        "Amazon Job Search returned a 403 / request-blocked page. "
-        "Method 2 is PAUSED, not stopped. Resolve the page manually in Brave, "
-        "then return to the terminal to resume.",
-        title="Amazon Job Search paused on 403",
-        priority=5,
-    )
     log.warning(
-        "403 / request-blocked page detected. Method 2 is paused for manual recovery."
+        "403 / request-blocked page detected. Method 2 monitoring is PAUSED."
+    )
+    _notify(
+        "Amazon Job Search returned a 403 / Request blocked page.\n"
+        "Method 2 is PAUSED, not stopped.\n"
+        f"No automatic reload will be made for {BLOCKED_RETRY_SECONDS} seconds.\n"
+        f"If the block remains, one recovery reload will be tried every "
+        f"{BLOCKED_RETRY_SECONDS} seconds.",
+        title="Amazon Job Search 403 recovery mode",
+        priority=5,
     )
 
     while True:
-        print("\nAMAZON 403 / REQUEST BLOCKED")
-        print("Method 2 is PAUSED; it has not exited.")
-        print("Use Brave manually and wait until Amazon Jobs is accessible again.")
-        print("Do not close the browser.")
-        choice = input(
-            "Press Enter after the block is cleared, or type Q to stop: "
-        ).strip().casefold()
+        log.warning(
+            "403 recovery wait: no automatic reload for up to %s seconds. "
+            "Passive page check every %.0f second(s).",
+            BLOCKED_RETRY_SECONDS,
+            PASSIVE_RECOVERY_POLL_SECONDS,
+        )
 
-        if choice in {"q", "quit", "stop"}:
-            stop_alarm()
-            log.info("User chose to stop while paused on 403.")
-            return False
+        deadline = time.monotonic() + BLOCKED_RETRY_SECONDS
+        while time.monotonic() < deadline:
+            if page.is_closed():
+                stop_alarm()
+                log.error("Amazon Jobs tab was closed during 403 recovery.")
+                return False
 
-        if page.is_closed():
-            stop_alarm()
-            raise RuntimeError("The Amazon Jobs tab was closed during 403 recovery.")
+            if not page_is_blocked(page):
+                try:
+                    if page_has_security_challenge(page):
+                        log.warning(
+                            "403 is gone but Amazon shows a security/verification "
+                            "step. Waiting for the user to complete it manually."
+                        )
+                    else:
+                        # Confirm the block did not immediately return.
+                        time.sleep(0.5)
+                        if not page_is_blocked(page):
+                            elapsed = int(time.monotonic() - started_monotonic)
+                            stop_alarm()
+                            log.warning(
+                                "403 CLEARED after about %s seconds. "
+                                "Resuming Method 2 monitoring.",
+                                elapsed,
+                            )
+                            _notify(
+                                "Amazon Jobs is no longer showing the 403. "
+                                "Method 2 monitoring has resumed.",
+                                title="Amazon Job Search resumed",
+                                priority=3,
+                            )
+                            return True
+                except Exception:
+                    pass
+
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                time.sleep(
+                    min(PASSIVE_RECOVERY_POLL_SECONDS, remaining)
+                )
+
+        attempt += 1
+        log.warning(
+            "403 automatic recovery test %s: performing one browser reload "
+            "after the %s-second quiet period.",
+            attempt,
+            BLOCKED_RETRY_SECONDS,
+        )
+
+        try:
+            page.reload(wait_until="domcontentloaded", timeout=30000)
+        except Exception as exc:
+            if page.is_closed():
+                stop_alarm()
+                log.error("Amazon Jobs tab closed during 403 recovery reload.")
+                return False
+            log.warning(
+                "403 recovery reload %s did not complete normally: %s. "
+                "Remaining in recovery mode.",
+                attempt,
+                exc,
+            )
+            continue
 
         if page_is_blocked(page):
-            log.warning("Amazon still shows the 403 / request-blocked page.")
-            print("Amazon is still blocked. Clear it manually in Brave, then try again.")
+            log.warning(
+                "403 is still present after recovery test %s. "
+                "Waiting another %s seconds before trying again.",
+                attempt,
+                BLOCKED_RETRY_SECONDS,
+            )
             continue
 
         try:
-            open_job_search(page, search_location)
-        except Exception as exc:
-            if _is_403_error(exc):
-                log.warning("403 returned again while verifying recovery.")
-                print("Amazon returned 403 again. Wait and clear it manually before retrying.")
+            if page_has_security_challenge(page):
+                log.warning(
+                    "403 cleared, but Amazon shows security/verification. "
+                    "Waiting passively for manual completion."
+                )
                 continue
-            stop_alarm()
-            raise
+        except Exception:
+            pass
 
+        time.sleep(0.5)
         if page_is_blocked(page):
-            log.warning("403 returned again after reopening the search page.")
-            print("Amazon is still blocked. Wait and clear it manually before retrying.")
+            log.warning(
+                "403 returned during recovery verification. "
+                "Remaining in recovery mode."
+            )
             continue
 
+        elapsed = int(time.monotonic() - started_monotonic)
         stop_alarm()
-        log.info("403 cleared manually. Resuming Method 2 monitoring.")
+        log.warning(
+            "403 CLEARED after about %s seconds and %s recovery reload(s). "
+            "Resuming Method 2 monitoring.",
+            elapsed,
+            attempt,
+        )
         _notify(
-            "Amazon Jobs is accessible again. Method 2 monitoring has resumed.",
+            "Amazon Jobs is no longer showing the 403. "
+            "Method 2 monitoring has resumed.",
             title="Amazon Job Search resumed",
             priority=3,
         )
         return True
-
 
 def _find_candidate_by_key(page, wanted_key: str):
     """Re-find a lazy-loaded job card by its stable key."""
@@ -1442,12 +1518,8 @@ def run() -> None:
                         if not _is_403_error(exc):
                             raise
                         state = JobSearchState.BLOCKED
-                        if not _wait_for_manual_403_recovery(
-                            page,
-                            search_location,
-                            log,
-                        ):
-                            stop_reason = "stopped by user during 403 pause"
+                        if not _recover_from_403(page, log):
+                            stop_reason = "403 recovery could not continue"
                             break
                         first_scan = True
                         state = JobSearchState.JOB_SEARCH
@@ -1456,12 +1528,8 @@ def run() -> None:
 
                 if page_is_blocked(page):
                     state = JobSearchState.BLOCKED
-                    if not _wait_for_manual_403_recovery(
-                        page,
-                        search_location,
-                        log,
-                    ):
-                        stop_reason = "stopped by user during 403 pause"
+                    if not _recover_from_403(page, log):
+                        stop_reason = "403 recovery could not continue"
                         break
                     first_scan = True
                     state = JobSearchState.JOB_SEARCH
@@ -1480,12 +1548,8 @@ def run() -> None:
                     if not _is_403_error(exc):
                         raise
                     state = JobSearchState.BLOCKED
-                    if not _wait_for_manual_403_recovery(
-                        page,
-                        search_location,
-                        log,
-                    ):
-                        stop_reason = "stopped by user during 403 pause"
+                    if not _recover_from_403(page, log):
+                        stop_reason = "403 recovery could not continue"
                         break
                     first_scan = True
                     state = JobSearchState.JOB_SEARCH
