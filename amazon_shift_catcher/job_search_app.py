@@ -658,6 +658,79 @@ def _is_403_error(exc: Exception) -> bool:
     return "403" in text or "request-blocked" in text or "request blocked" in text
 
 
+def _is_security_error(exc: Exception) -> bool:
+    text = str(exc).casefold()
+    return (
+        "security/verification challenge" in text
+        or "security challenge" in text
+        or "verification challenge" in text
+    )
+
+
+def _pause_for_security_challenge(page, log) -> bool:
+    """Pause Method 2 until the user manually clears Amazon verification."""
+    _save_screenshot(page, "job-search-security-check", log)
+    stop_alarm()
+    log.warning(
+        "Amazon security/verification challenge detected. "
+        "Method 2 is PAUSED and will not continue automatically."
+    )
+    _notify(
+        "Amazon Jobs is showing a security/verification challenge. "
+        "Method 2 is PAUSED. Complete the check manually in Brave, "
+        "then return to the terminal and press Enter to resume.",
+        title="Amazon Job Search paused for verification",
+        priority=5,
+    )
+
+    while True:
+        print("\nAMAZON SECURITY / VERIFICATION CHECK")
+        print("Method 2 is PAUSED; the program has NOT stopped.")
+        print("Complete the verification manually in Brave.")
+        choice = input(
+            "Press Enter when verification is complete, or type Q to stop: "
+        ).strip().casefold()
+
+        if choice in {"q", "quit", "stop"}:
+            log.info("User chose to stop during security/verification pause.")
+            return False
+
+        if page.is_closed():
+            log.error(
+                "Amazon Jobs tab was closed during security/verification pause."
+            )
+            return False
+
+        try:
+            if page_has_security_challenge(page):
+                print(
+                    "Verification is still visible. Complete it in Brave, "
+                    "then press Enter again."
+                )
+                log.warning(
+                    "User requested resume, but security/verification "
+                    "challenge is still present."
+                )
+                continue
+        except Exception as exc:
+            log.warning(
+                "Could not verify security-page state yet: %s",
+                exc,
+            )
+            continue
+
+        log.info(
+            "Security/verification challenge cleared manually. "
+            "Resuming Method 2 monitoring."
+        )
+        _notify(
+            "Amazon verification is cleared. Method 2 monitoring has resumed.",
+            title="Amazon Job Search resumed",
+            priority=3,
+        )
+        return True
+
+
 def _manual_403_check_requested() -> bool:
     """Return True when the user presses C in the Windows terminal.
 
@@ -1579,6 +1652,16 @@ def run() -> None:
                     try:
                         refresh_job_search(page, search_location)
                     except Exception as exc:
+                        if _is_security_error(exc):
+                            state = JobSearchState.SECURITY_CHECK
+                            if not _pause_for_security_challenge(page, log):
+                                stop_reason = (
+                                    "stopped by user during security/verification pause"
+                                )
+                                break
+                            first_scan = True
+                            state = JobSearchState.JOB_SEARCH
+                            continue
                         if not _is_403_error(exc):
                             raise
                         state = JobSearchState.BLOCKED
@@ -1589,6 +1672,17 @@ def run() -> None:
                         state = JobSearchState.JOB_SEARCH
                         continue
                 first_scan = False
+
+                if page_has_security_challenge(page):
+                    state = JobSearchState.SECURITY_CHECK
+                    if not _pause_for_security_challenge(page, log):
+                        stop_reason = (
+                            "stopped by user during security/verification pause"
+                        )
+                        break
+                    first_scan = True
+                    state = JobSearchState.JOB_SEARCH
+                    continue
 
                 if page_is_blocked(page):
                     state = JobSearchState.BLOCKED
@@ -1609,6 +1703,16 @@ def run() -> None:
                         search_location,
                     )
                 except Exception as exc:
+                    if _is_security_error(exc):
+                        state = JobSearchState.SECURITY_CHECK
+                        if not _pause_for_security_challenge(page, log):
+                            stop_reason = (
+                                "stopped by user during security/verification pause"
+                            )
+                            break
+                        first_scan = True
+                        state = JobSearchState.JOB_SEARCH
+                        continue
                     if not _is_403_error(exc):
                         raise
                     state = JobSearchState.BLOCKED
