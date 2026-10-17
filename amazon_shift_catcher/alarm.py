@@ -32,3 +32,15 @@ def start_alarm():
 
 def stop_alarm():
     _stop_event.set()
+
+
+def play_alarm_once():
+    """Play one short alert sound without starting the repeating alarm loop."""
+    def _play_once():
+        if sys.platform.startswith("win"):
+            import winsound
+            winsound.Beep(2600, 700)
+        else:
+            print("\\a", end="", flush=True)
+
+    threading.Thread(target=_play_once, daemon=True).start()
