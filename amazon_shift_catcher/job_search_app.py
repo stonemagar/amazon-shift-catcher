@@ -61,7 +61,7 @@ LOG_DIR = ROOT / "logs"
 SCREENSHOT_DIR = ROOT / "screenshots"
 LOCATION_STORE = ROOT / "data" / "job_search_locations.json"
 LAST_SETTINGS_STORE = ROOT / "data" / "job_search_last_settings.json"
-BLOCKED_RETRY_SECONDS = 60
+BLOCKED_RETRY_SECONDS = 30
 PASSIVE_RECOVERY_POLL_SECONDS = 1.0
 
 
