@@ -241,6 +241,29 @@ def _visible_pagination_control(page: Page, pattern: re.Pattern):
     return None
 
 
+def read_current_job_results_page(page: Page) -> int | None:
+    """Read Amazon's currently selected result-page number without clicking."""
+    try:
+        candidates = page.locator(
+            "[aria-current='page'], "
+            "[aria-selected='true']"
+        )
+        count = min(candidates.count(), 20)
+        for index in range(count):
+            item = candidates.nth(index)
+            try:
+                text = " ".join(item.inner_text(timeout=300).split())
+            except Exception:
+                continue
+            if re.fullmatch(r"\d+", text):
+                value = int(text)
+                if value >= 1:
+                    return value
+    except Exception:
+        pass
+    return None
+
+
 def go_to_job_results_page(page: Page, target_page: int) -> bool:
     """Navigate Amazon result pagination to one numbered page.
 
@@ -296,9 +319,20 @@ def go_to_job_results_page(page: Page, target_page: int) -> bool:
 
 
 def go_to_next_job_results_page(page: Page, current_page: int) -> bool:
-    """Move to the next numbered Amazon result page when pagination exists."""
-    if go_to_job_results_page(page, current_page + 1):
-        return True
+    """Move to the next numbered Amazon result page when pagination exists.
+
+    Return True only when the page number actually advances. This prevents an
+    already-active page 2 button from being treated as a successful move from
+    page 1, which could otherwise leave the scanner looping on page 2.
+    """
+    before_page = read_current_job_results_page(page) or current_page
+    target_page = max(current_page, before_page) + 1
+
+    if go_to_job_results_page(page, target_page):
+        after_page = read_current_job_results_page(page)
+        if after_page is None or after_page > before_page:
+            return True
+        return False
 
     # Fallback for pagers that expose only a Next/arrow control.
     for pattern in (
