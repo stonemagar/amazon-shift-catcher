@@ -56,6 +56,7 @@ ROOT = Path(__file__).resolve().parent.parent
 LOG_DIR = ROOT / "logs"
 SCREENSHOT_DIR = ROOT / "screenshots"
 LOCATION_STORE = ROOT / "data" / "job_search_locations.json"
+LAST_SETTINGS_STORE = ROOT / "data" / "job_search_last_settings.json"
 
 
 class JobSearchState(str, Enum):
@@ -96,6 +97,217 @@ def load_config() -> dict:
             "config.json not found. Copy config.example.json to config.json first."
         )
     return json.loads(config_path.read_text(encoding="utf-8"))
+
+
+def load_last_settings() -> dict:
+    """Load the last Method 2 startup choices from the local data folder."""
+    try:
+        if not LAST_SETTINGS_STORE.exists():
+            return {}
+        data = json.loads(LAST_SETTINGS_STORE.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def save_last_settings(
+    search_location: str,
+    desired_locations: list[str],
+    location_strategy: str,
+    rules: dict,
+) -> None:
+    """Persist non-secret Method 2 preferences for the next run."""
+    LAST_SETTINGS_STORE.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "search_location": search_location,
+        "desired_locations": list(desired_locations),
+        "location_strategy": location_strategy,
+        "hours_preference": rules.get("hours_preference", {"mode": "any"}),
+        "days_preference": rules.get("days_preference", {"mode": "any"}),
+        "time_preference": rules.get("time_preference", {"mode": "any"}),
+    }
+    LAST_SETTINGS_STORE.write_text(
+        json.dumps(payload, indent=2),
+        encoding="utf-8",
+    )
+
+
+def _apply_saved_preferences(base_rules: dict, settings: dict) -> dict:
+    """Rebuild runtime rules from a previously saved Method 2 selection."""
+    rules = dict(base_rules)
+
+    hours = settings.get("hours_preference") or {"mode": "any"}
+    hour_mode = hours.get("mode", "any")
+    if hour_mode == "exact":
+        rules = apply_hours_preference(
+            rules,
+            "exact",
+            exact_hours=float(hours["exact_hours"]),
+        )
+    elif hour_mode == "max":
+        rules = apply_hours_preference(
+            rules,
+            "max",
+            max_hours=float(hours["max_hours"]),
+        )
+    elif hour_mode == "preferred_max":
+        rules = apply_hours_preference(
+            rules,
+            "preferred_max",
+            preferred_hours=float(hours["preferred_hours"]),
+            max_hours=float(hours["max_hours"]),
+        )
+    else:
+        rules = apply_hours_preference(rules, "any")
+
+    days = settings.get("days_preference") or {"mode": "any"}
+    day_mode = days.get("mode", "any")
+    if day_mode in {"allowed", "blocked"}:
+        rules = apply_days_preference(
+            rules,
+            day_mode,
+            list(days.get("days", [])),
+        )
+    else:
+        rules = apply_days_preference(rules, "any")
+
+    time_pref = settings.get("time_preference") or {"mode": "any"}
+    time_mode = time_pref.get("mode", "any")
+    if time_mode == "window":
+        rules = apply_time_preference(
+            rules,
+            "window",
+            earliest_start=time_pref.get("earliest_start"),
+            latest_end=time_pref.get("latest_end"),
+        )
+    elif time_mode in {"day", "night"}:
+        rules = apply_time_preference(rules, time_mode)
+    else:
+        rules = apply_time_preference(rules, "any")
+
+    return rules
+
+
+def _saved_settings_summary(settings: dict) -> list[str]:
+    desired = settings.get("desired_locations") or []
+    hours = settings.get("hours_preference") or {"mode": "any"}
+    days = settings.get("days_preference") or {"mode": "any"}
+    time_pref = settings.get("time_preference") or {"mode": "any"}
+
+    lines = [
+        "Amazon search location: "
+        + (settings.get("search_location") or "EMPTY"),
+        "Desired card locations: "
+        + (", ".join(desired) if desired else "ANY"),
+    ]
+
+    if len(desired) > 1:
+        lines.append(
+            "Location strategy: "
+            + str(settings.get("location_strategy", "first")).upper()
+        )
+
+    hour_mode = hours.get("mode", "any")
+    if hour_mode == "exact":
+        lines.append(f"Hours: EXACTLY {hours.get('exact_hours'):g}h")
+    elif hour_mode == "max":
+        lines.append(f"Hours: MAXIMUM {hours.get('max_hours'):g}h")
+    elif hour_mode == "preferred_max":
+        lines.append(
+            f"Hours: PREFER {hours.get('preferred_hours'):g}h, "
+            f"MAXIMUM {hours.get('max_hours'):g}h"
+        )
+    else:
+        lines.append("Hours: ANY")
+
+    day_mode = days.get("mode", "any")
+    if day_mode == "allowed":
+        lines.append("Allowed days: " + ", ".join(days.get("days", [])))
+    elif day_mode == "blocked":
+        lines.append("Blocked days: " + ", ".join(days.get("days", [])))
+    else:
+        lines.append("Days: ANY")
+
+    time_mode = time_pref.get("mode", "any")
+    if time_mode == "day":
+        lines.append("Time: DAY SHIFT")
+    elif time_mode == "night":
+        lines.append("Time: NIGHT SHIFT")
+    elif time_mode == "window":
+        lines.append(
+            "Time: "
+            f"{time_pref.get('earliest_start')} - "
+            f"{time_pref.get('latest_end')}"
+        )
+    else:
+        lines.append("Time: ANY")
+
+    return lines
+
+
+def choose_or_reuse_settings(base_rules: dict):
+    """Reuse the last complete Method 2 setup or collect and remember a new one."""
+    saved = load_last_settings()
+
+    if saved:
+        print("\n" + "=" * 64)
+        print("LAST METHOD 2 SETTINGS")
+        for line in _saved_settings_summary(saved):
+            print(line)
+        print("=" * 64)
+
+        choice = input("Use these settings again? [Y/n]: ").strip().casefold()
+        if choice in {"", "y", "yes"}:
+            try:
+                search_location = str(saved.get("search_location") or "")
+                desired_locations = normalise_location_terms(
+                    ",".join(saved.get("desired_locations") or [])
+                )
+                location_strategy = str(
+                    saved.get("location_strategy") or "first"
+                )
+                if len(desired_locations) <= 1:
+                    location_strategy = "first"
+                elif location_strategy not in {"first", "priority"}:
+                    location_strategy = "first"
+
+                runtime_rules = _apply_saved_preferences(
+                    base_rules,
+                    saved,
+                )
+                print("Using saved Method 2 settings.")
+                return (
+                    search_location,
+                    desired_locations,
+                    location_strategy,
+                    runtime_rules,
+                )
+            except Exception:
+                print(
+                    "Saved settings could not be reused. "
+                    "Please choose the settings again."
+                )
+
+    search_location = choose_search_location()
+    desired_locations = choose_desired_locations()
+    location_strategy = choose_location_strategy(desired_locations)
+    runtime_rules = choose_hours_preference(base_rules)
+    runtime_rules = choose_days_preference(runtime_rules)
+    runtime_rules = choose_time_preference(runtime_rules)
+
+    save_last_settings(
+        search_location,
+        desired_locations,
+        location_strategy,
+        runtime_rules,
+    )
+
+    return (
+        search_location,
+        desired_locations,
+        location_strategy,
+        runtime_rules,
+    )
 
 
 def choose_search_location() -> str:
@@ -938,13 +1150,12 @@ def review_shift_opportunities(
 def run() -> None:
     load_dotenv(ROOT / ".env")
     config = load_config()
-    search_location = choose_search_location()
-    desired_locations = choose_desired_locations()
-    location_strategy = choose_location_strategy(desired_locations)
-
-    runtime_rules = choose_hours_preference(config.get("rules", {}))
-    runtime_rules = choose_days_preference(runtime_rules)
-    runtime_rules = choose_time_preference(runtime_rules)
+    (
+        search_location,
+        desired_locations,
+        location_strategy,
+        runtime_rules,
+    ) = choose_or_reuse_settings(config.get("rules", {}))
     print_filter_summary(
         desired_locations,
         runtime_rules,
