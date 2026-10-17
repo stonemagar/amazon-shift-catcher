@@ -10,7 +10,7 @@ def _alarm_loop():
     if sys.platform.startswith("win"):
         import winsound
         while not _stop_event.is_set():
-            winsound.Beep(2600, 700)
+            winsound.Beep(2600, 180)
             if _stop_event.is_set():
                 break
             winsound.Beep(3300, 700)
