@@ -960,7 +960,13 @@ def run() -> None:
     save_unique_locations(LOCATION_STORE, [])
     log.info("Location storage file=%s", LOCATION_STORE)
 
-    interval = max(3, int(config.get("check_interval_seconds", 10)))
+    # Method 2 uses a target scan-cycle interval rather than sleeping this
+    # entire amount after each scan. This keeps reload/scan overhead from being
+    # added on top of the configured interval.
+    interval = max(
+        3,
+        int(config.get("job_search_check_interval_seconds", 5)),
+    )
     timeout_ms = int(config.get("navigation_timeout_seconds", 30)) * 1000
     cdp_url = os.getenv("BRAVE_CDP_URL", "http://127.0.0.1:9222").strip()
 
@@ -969,7 +975,7 @@ def run() -> None:
 
     log.info("Starting separate Amazon Job Search catching method.")
     log.info("Existing Method 1 code path is not being used or modified.")
-    log.info("Check interval=%ss", interval)
+    log.info("Target scan cycle=%ss", interval)
     log.info(
         "Amazon search location=%s",
         search_location if search_location else "EMPTY",
@@ -1011,14 +1017,25 @@ def run() -> None:
                 "Target roles: Delivery Station Warehouse Associate; "
                 "Sortation Center Warehouse Associate; "
                 "Fulfilment Center Warehouse Associate; Warehouse Operator\n"
-                f"Check interval: {interval} seconds.",
+                f"Target scan cycle: {interval} seconds.",
                 title="Amazon Job Search monitor started",
                 priority=3,
             )
 
+            first_scan = True
+
             while True:
+                cycle_started = time.monotonic()
+
                 if page.is_closed():
                     raise RuntimeError("The Amazon Jobs tab was closed.")
+
+                # Refresh at the start of each later cycle so navigation and
+                # rendering time count inside the target cycle instead of being
+                # added after a full sleep.
+                if not first_scan:
+                    open_job_search(page, search_location)
+                first_scan = False
 
                 if page_is_blocked(page):
                     state = JobSearchState.BLOCKED
@@ -1232,12 +1249,18 @@ def run() -> None:
                     break
 
                 state = JobSearchState.JOB_SEARCH
+                elapsed = time.monotonic() - cycle_started
+                wait_seconds = max(0.0, interval - elapsed)
                 log.info(
-                    "No matching target warehouse job found. Checking again in %s seconds.",
+                    "No matching target warehouse job found. "
+                    "Cycle took %.2fs; next scan starts in %.2fs "
+                    "(target cycle %ss).",
+                    elapsed,
+                    wait_seconds,
                     interval,
                 )
-                time.sleep(interval)
-                open_job_search(page, search_location)
+                if wait_seconds > 0:
+                    time.sleep(wait_seconds)
 
         except KeyboardInterrupt:
             stop_reason = "stopped by user"
