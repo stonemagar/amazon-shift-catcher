@@ -671,6 +671,7 @@ def _pause_for_security_challenge(page, log) -> bool:
     """Pause Method 2 until the user manually clears Amazon verification."""
     _save_screenshot(page, "job-search-security-check", log)
     stop_alarm()
+    play_alarm_once()
     log.warning(
         "Amazon security/verification challenge detected. "
         "Method 2 is PAUSED and will not continue automatically."
