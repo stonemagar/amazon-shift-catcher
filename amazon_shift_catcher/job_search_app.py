@@ -1580,7 +1580,7 @@ def run() -> None:
     # added on top of the configured interval.
     interval = max(
         3,
-        int(config.get("job_search_check_interval_seconds", 5)),
+        int(config.get("job_search_check_interval_seconds", 10)),
     )
     timeout_ms = int(config.get("navigation_timeout_seconds", 30)) * 1000
     cdp_url = os.getenv("BRAVE_CDP_URL", "http://127.0.0.1:9222").strip()
