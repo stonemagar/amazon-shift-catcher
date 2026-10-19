@@ -36,7 +36,7 @@ from .notifier import send_notification
 ROOT = Path(__file__).resolve().parent.parent
 LOG_DIR = ROOT / "logs"
 SCREENSHOT_DIR = ROOT / "screenshots"
-BLOCKED_RETRY_SECONDS = 60
+BLOCKED_RETRY_SECONDS = 30
 PASSIVE_RECOVERY_POLL_SECONDS = 1.0
 
 EMPTY_SCHEDULE_RE = re.compile(
