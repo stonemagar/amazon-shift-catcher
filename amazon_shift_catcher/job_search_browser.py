@@ -924,6 +924,37 @@ def _select_all_jobs_if_available(page: Page) -> None:
             continue
 
 
+def wait_for_job_search_results_ready(
+    page: Page,
+    timeout_seconds: float = 8.0,
+) -> bool:
+    """Wait for Amazon's asynchronously rendered search results after navigation/reload.
+
+    DOMContentLoaded can fire before the SPA has rendered the job count/cards.
+    Return as soon as target-role cards are visible, or immediately for a
+    confirmed zero-result search. On timeout, let the caller continue normally.
+    """
+    deadline = time.monotonic() + max(1.0, timeout_seconds)
+
+    while time.monotonic() < deadline:
+        if page_has_security_challenge(page):
+            raise RuntimeError("Amazon security/verification challenge detected.")
+
+        if page_is_blocked(page):
+            raise RuntimeError("Amazon returned a 403 / request-blocked page.")
+
+        reported_total = read_reported_job_count(page)
+        if reported_total == 0:
+            return True
+
+        if read_warehouse_job_cards(page):
+            return True
+
+        time.sleep(0.25)
+
+    return False
+
+
 def open_job_search(page: Page, search_location: str = "") -> None:
     """Open job search with an empty job-keyword field and chosen location."""
     page.goto(JOB_SEARCH_URL, wait_until="domcontentloaded")
@@ -937,7 +968,7 @@ def open_job_search(page: Page, search_location: str = "") -> None:
     _select_all_jobs_if_available(page)
     _clear_job_search_if_available(page)
     _fill_search_location_if_available(page, search_location.strip())
-    page.wait_for_timeout(700)
+    wait_for_job_search_results_ready(page, timeout_seconds=8.0)
 
 
 def refresh_job_search(page: Page, search_location: str = "") -> None:
@@ -965,7 +996,7 @@ def refresh_job_search(page: Page, search_location: str = "") -> None:
     _select_all_jobs_if_available(page)
     _clear_job_search_if_available(page)
     _fill_search_location_if_available(page, search_location.strip())
-    page.wait_for_timeout(500)
+    wait_for_job_search_results_ready(page, timeout_seconds=8.0)
 
 
 def open_job_candidate(page: Page, candidate: JobCandidate) -> None:
