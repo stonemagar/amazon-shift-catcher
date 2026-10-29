@@ -44,6 +44,9 @@ class JobSearchMethodTests(unittest.TestCase):
             WAREHOUSE_TITLE_RE.search("Fulfillment Center Warehouse Associate")
         )
         self.assertIsNotNone(
+            WAREHOUSE_TITLE_RE.search("Warehouse Associate")
+        )
+        self.assertIsNotNone(
             WAREHOUSE_TITLE_RE.search("Warehouse Operator")
         )
         self.assertIsNone(
