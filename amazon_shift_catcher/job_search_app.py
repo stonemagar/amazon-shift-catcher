@@ -1418,6 +1418,29 @@ def advance_to_shift_selection(page, log):
                 "Complete it manually, then run the catcher again."
             )
 
+        if stage == "APPLICATION_INTEGRITY_NOTICE":
+            log.warning(
+                "Amazon application integrity notice detected. "
+                "Method 2 is paused for manual completion."
+            )
+            print("\nAMAZON APPLICATION INTEGRITY NOTICE")
+            print("Method 2 is PAUSED; it has not stopped.")
+            print("Complete/acknowledge this page manually in Brave.")
+            input("Press Enter after you have moved past this page: ")
+
+            if page.is_closed():
+                raise RuntimeError(
+                    "Amazon application tab was closed during the integrity notice."
+                )
+
+            if detect_application_stage(page) == "APPLICATION_INTEGRITY_NOTICE":
+                print("The integrity notice page is still open.")
+                continue
+
+            last_stage = None
+            idle_started = time.monotonic()
+            continue
+
         if stage == "POST_SHIFT":
             log.warning(
                 "Amazon resumed this application after shift selection. "
