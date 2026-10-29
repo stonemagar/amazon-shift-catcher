@@ -815,6 +815,9 @@ def detect_application_stage(page: Page) -> str:
     if "#/nhe" in url:
         return "APPOINTMENT_SELECTION"
 
+    if "#/application-integrity-notice" in url:
+        return "APPLICATION_INTEGRITY_NOTICE"
+
     # Prefer visible action buttons over generic page text. This lets the
     # post-offer Additional Information page use its own visible Next button,
     # even when a scheduleId is already present in the URL.
