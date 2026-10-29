@@ -22,6 +22,7 @@ TARGET_ROLE_TITLE_RE = re.compile(
     r"(?:Delivery\s+Station\s+Warehouse\s+Associate|"
     r"Sortation\s+Center\s+Warehouse\s+Associate|"
     r"Fulfil(?:l)?ment\s+Center\s+Warehouse\s+Associate|"
+    r"Warehouse\s+Associate|"
     r"Warehouse\s+Operator)",
     re.I,
 )
