@@ -254,11 +254,20 @@ def scroll_job_search_results(page: Page) -> bool:
 
 
 def _visible_pagination_control(page: Page, pattern: re.Pattern):
-    """Find a visible pagination button/link matching an exact label."""
+    """Find a visible enabled pagination control matching a label."""
     candidates = [
         page.get_by_role("button", name=pattern),
         page.get_by_role("link", name=pattern),
-        page.locator("button, a, [role='button']").filter(has_text=pattern),
+        page.locator(
+            "nav button, nav a, nav [role='button'], nav [role='link'], "
+            "[aria-label*='pagination' i] button, "
+            "[aria-label*='pagination' i] a, "
+            "[aria-label*='pagination' i] [role='button'], "
+            "[class*='pagination' i] button, "
+            "[class*='pagination' i] a, "
+            "[class*='pagination' i] [role='button'], "
+            "button, a, [role='button'], [role='link']"
+        ).filter(has_text=pattern),
     ]
 
     for locator in candidates:
@@ -277,134 +286,232 @@ def _visible_pagination_control(page: Page, pattern: re.Pattern):
     return None
 
 
+def _pagination_control_by_attributes(page: Page, target_page: int):
+    """Find controls such as 'Go to page 2' even when visible text is hidden."""
+    selectors = [
+        f"button[aria-label*='page {target_page}' i]",
+        f"a[aria-label*='page {target_page}' i]",
+        f"[role='button'][aria-label*='page {target_page}' i]",
+        f"[role='link'][aria-label*='page {target_page}' i]",
+        f"button[title*='page {target_page}' i]",
+        f"a[title*='page {target_page}' i]",
+    ]
+
+    for selector in selectors:
+        item = _visible_first(page.locator(selector))
+        if item is None:
+            continue
+        try:
+            disabled = item.get_attribute("disabled")
+            aria_disabled = item.get_attribute("aria-disabled")
+            if disabled is not None or str(aria_disabled).lower() == "true":
+                continue
+        except Exception:
+            pass
+        return item
+
+    return None
+
+
 def read_current_job_results_page(page: Page) -> int | None:
     """Read Amazon's currently selected result-page number without clicking."""
+    selectors = (
+        "[aria-current='page'], "
+        "[aria-selected='true'], "
+        "[class*='active' i][aria-label*='page' i]"
+    )
     try:
-        candidates = page.locator(
-            "[aria-current='page'], "
-            "[aria-selected='true']"
-        )
-        count = min(candidates.count(), 20)
+        candidates = page.locator(selectors)
+        count = min(candidates.count(), 30)
         for index in range(count):
             item = candidates.nth(index)
+
+            values = []
             try:
-                text = " ".join(item.inner_text(timeout=300).split())
+                values.append(" ".join(item.inner_text(timeout=300).split()))
             except Exception:
-                continue
-            if re.fullmatch(r"\d+", text):
-                value = int(text)
-                if value >= 1:
-                    return value
+                pass
+            for attr in ("aria-label", "title"):
+                try:
+                    value = item.get_attribute(attr)
+                except Exception:
+                    value = None
+                if value:
+                    values.append(value)
+
+            for value in values:
+                direct = re.fullmatch(r"\s*(\d+)\s*", value)
+                if direct:
+                    number = int(direct.group(1))
+                    if number >= 1:
+                        return number
+
+                labelled = re.search(r"\bpage\s+(\d+)\b", value, re.I)
+                if labelled:
+                    number = int(labelled.group(1))
+                    if number >= 1:
+                        return number
     except Exception:
         pass
     return None
 
 
-def go_to_job_results_page(page: Page, target_page: int) -> bool:
-    """Navigate Amazon result pagination to one numbered page.
+def _wait_for_result_page_change(
+    page: Page,
+    before_page: int | None,
+    target_page: int | None = None,
+    timeout_seconds: float = 4.0,
+) -> bool:
+    """Wait briefly for Amazon's SPA pagination state/cards to update."""
+    deadline = time.monotonic() + timeout_seconds
 
-    The current site renders pagination near the footer (for example 1, 2, >).
-    Scroll result containers to their end first so the pager is mounted/visible,
-    then click the requested page number.
-    """
+    while time.monotonic() < deadline:
+        current = read_current_job_results_page(page)
+        if target_page is not None and current == target_page:
+            return True
+        if before_page is not None and current is not None and current != before_page:
+            return True
+
+        # A newly rendered result set is also sufficient when Amazon does not
+        # expose an active-page ARIA state reliably.
+        try:
+            if read_warehouse_job_cards(page):
+                page.wait_for_timeout(150)
+        except Exception:
+            pass
+
+        time.sleep(0.15)
+
+    return False
+
+
+def go_to_job_results_page(page: Page, target_page: int) -> bool:
+    """Navigate Amazon result pagination to one numbered page."""
     if target_page < 1:
         return False
 
-    # Pagination is below the result list. Move all the way down first.
-    for _ in range(30):
+    before_page = read_current_job_results_page(page)
+    if before_page == target_page:
+        reset_job_search_scroll(page)
+        return True
+
+    # Pagination is normally below the result list. Move result containers and
+    # the document to the bottom so lazy-mounted pager controls become visible.
+    for _ in range(40):
         if not scroll_job_search_results(page):
             break
 
     try:
         page.evaluate(
-            "() => window.scrollTo(0, document.documentElement.scrollHeight)"
+            """() => {
+                window.scrollTo(0, document.documentElement.scrollHeight);
+                const nodes = document.querySelectorAll(
+                    'main, [role="main"], section, div, ul'
+                );
+                for (const node of nodes) {
+                    if (node.scrollHeight > node.clientHeight + 40) {
+                        node.scrollTop = node.scrollHeight;
+                    }
+                }
+            }"""
         )
-        page.wait_for_timeout(200)
+        page.wait_for_timeout(300)
     except Exception:
         pass
 
     pattern = re.compile(rf"^\s*{target_page}\s*$")
     control = _visible_pagination_control(page, pattern)
     if control is None:
+        control = _pagination_control_by_attributes(page, target_page)
+    if control is None:
         return False
-
-    try:
-        # Avoid clicking the already-active page if the site exposes state.
-        if (
-            str(control.get_attribute("aria-current")).lower() == "page"
-            or str(control.get_attribute("aria-selected")).lower() == "true"
-        ):
-            reset_job_search_scroll(page)
-            return True
-    except Exception:
-        pass
 
     try:
         control.click(timeout=5000)
     except Exception:
         return False
 
-    # Give the SPA time to replace its cards, then return to the top.
-    try:
-        page.wait_for_timeout(700)
-    except Exception:
-        time.sleep(0.7)
-
+    _wait_for_result_page_change(
+        page,
+        before_page,
+        target_page=target_page,
+        timeout_seconds=4.0,
+    )
     reset_job_search_scroll(page)
+
+    after_page = read_current_job_results_page(page)
+    if after_page is not None:
+        return after_page == target_page
+
+    # Some Amazon builds do not expose active page state. A successful click is
+    # still treated as navigation so the caller can scan the newly rendered set.
     return True
 
 
 def go_to_next_job_results_page(page: Page, current_page: int) -> bool:
-    """Move to the next numbered Amazon result page when pagination exists.
-
-    Return True only when the page number actually advances. This prevents an
-    already-active page 2 button from being treated as a successful move from
-    page 1, which could otherwise leave the scanner looping on page 2.
-    """
+    """Move to the next Amazon result page when pagination exists."""
     before_page = read_current_job_results_page(page) or current_page
-    target_page = max(current_page, before_page) + 1
+    target_page = before_page + 1
 
     if go_to_job_results_page(page, target_page):
-        after_page = read_current_job_results_page(page)
-        if after_page is None or after_page > before_page:
-            return True
-        return False
+        return True
 
-    # Fallback for pagers that expose only a Next/arrow control.
-    for pattern in (
+    # Fallback for text or icon based Next controls.
+    patterns = (
         re.compile(r"^\s*Next\s*$", re.I),
+        re.compile(r"^\s*Next\s+page\s*$", re.I),
         re.compile(r"^\s*[>›»]\s*$"),
-    ):
+    )
+    for pattern in patterns:
         control = _visible_pagination_control(page, pattern)
         if control is None:
             continue
         try:
             control.click(timeout=5000)
-            page.wait_for_timeout(700)
-            reset_job_search_scroll(page)
-            return True
         except Exception:
             continue
 
-    # Last fallback: aria-label/title can describe an icon-only arrow.
-    locators = [
-        page.locator(
-            "button[aria-label*='next' i], a[aria-label*='next' i], "
-            "[role='button'][aria-label*='next' i], "
-            "button[title*='next' i], a[title*='next' i]"
+        _wait_for_result_page_change(
+            page,
+            before_page,
+            target_page=None,
+            timeout_seconds=4.0,
         )
-    ]
-    for locator in locators:
-        control = _visible_first(locator)
-        if control is None:
-            continue
-        try:
-            control.click(timeout=5000)
-            page.wait_for_timeout(700)
-            reset_job_search_scroll(page)
+        reset_job_search_scroll(page)
+        after_page = read_current_job_results_page(page)
+        if after_page is None or after_page > before_page:
             return True
+
+    # Amazon may render an icon-only button with only aria-label/title/test id.
+    locator = page.locator(
+        "button[aria-label*='next' i], "
+        "a[aria-label*='next' i], "
+        "[role='button'][aria-label*='next' i], "
+        "[role='link'][aria-label*='next' i], "
+        "button[title*='next' i], "
+        "a[title*='next' i], "
+        "button[data-testid*='next' i], "
+        "[role='button'][data-testid*='next' i]"
+    )
+    control = _visible_first(locator)
+    if control is not None:
+        try:
+            disabled = control.get_attribute("disabled")
+            aria_disabled = control.get_attribute("aria-disabled")
+            if disabled is None and str(aria_disabled).lower() != "true":
+                control.click(timeout=5000)
+                _wait_for_result_page_change(
+                    page,
+                    before_page,
+                    target_page=None,
+                    timeout_seconds=4.0,
+                )
+                reset_job_search_scroll(page)
+                after_page = read_current_job_results_page(page)
+                if after_page is None or after_page > before_page:
+                    return True
         except Exception:
-            continue
+            pass
 
     return False
 
